@@ -165,10 +165,11 @@ async def shutdown_event():
 
 # --- 靜態檔案與主模板 (強化啟動檢查) ---
 try:
-    current_cwd = os.getcwd()
-    logger.debug(f"FastAPI app.py 啟動時的 CWD: {current_cwd}")
-    static_dir_path = os.path.join(current_cwd, "static")
-    templates_dir_path = os.path.join(current_cwd, templates_main_dir)
+    # Get the directory where app.py is located
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    logger.debug(f"FastAPI app.py 啟動時的 app_dir: {app_dir}")
+    static_dir_path = os.path.join(app_dir, "static")
+    templates_dir_path = os.path.join(app_dir, templates_main_dir) # templates_main_dir is "templates"
 
     # 嚴格檢查目錄是否存在，如果不存在則終止應用程式啟動
     if not os.path.exists(static_dir_path):
