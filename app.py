@@ -25,6 +25,10 @@ from pytubefix.exceptions import RegexMatchError, VideoUnavailable, PytubeFixErr
 
 import google.generativeai as genai
 
+# --- Default Prompts ---
+DEFAULT_SUMMARY_PROMPT_PY = "請提供這份文件的繁體中文摘要，風格應專業且資訊豐富，包含一個引人入勝的開頭段落，接著列出3-5個帶有子標題的關鍵重點，每個重點應有2-3個詳細說明。語言風格：專業、學術、客觀。"
+DEFAULT_TRANSCRIPT_PROMPT_PY = "請將這份音訊逐字稿轉換成繁體中文，並修正明顯的語法錯誤或口語贅詞，使其更流暢易讀。如果音檔內容包含多位發言者，請盡可能標示出不同的發言者 (例如：發言者A, 發言者B)。"
+
 # --- 配置日誌 (重要) ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -260,89 +264,176 @@ async def process_audio_and_generate_report_task(task_id: str, request_data: Gen
         tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
         logger.error(f"[TASK {task_id}] [ERROR] 失敗 - API 金鑰無效。"); return
 
+    source_basename = os.path.basename(request_data.source_path)
+    audio_file_for_api = None # Initialize outside try block for access in finally
+
     try:
-        # 模擬 AI 輸出和結構化資料轉換邏輯
-        # 這裡應該是實際調用 genai API 的地方
-        await asyncio.sleep(5 + len(tasks_db) * 0.5) # 調整模擬延時
+        # Ensure genai is configured with the API key for this task
+        genai.configure(api_key=global_api_key)
+        logger.info(f"[TASK {task_id}] genai configured with API key for task.")
 
-        simulated_summary_text: Optional[str] = None
-        simulated_transcript_text: Optional[str] = None
-        source_basename = os.path.basename(request_data.source_path)
+        # Upload audio file
+        logger.info(f"[TASK {task_id}] Starting audio file upload for: {request_data.source_path}")
+        try:
+            audio_file_for_api = genai.upload_file(path=request_data.source_path)
+            logger.info(f"[TASK {task_id}] Successfully uploaded audio file. File ID: {audio_file_for_api.name}, URI: {audio_file_for_api.uri}")
+        except Exception as e_upload:
+            logger.error(f"[TASK {task_id}] Error uploading audio file: {e_upload}")
+            tasks_db[task_id]["status"] = "failed"
+            tasks_db[task_id]["error_message"] = f"Audio file upload failed: {e_upload}"
+            tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
+            return # Exit if upload fails
 
-        # 根據 output_options 和 custom_prompts 生成模擬內容
-        # 這裡可以加入 genai.GenerativeModel().generate_content() 的實際呼叫
-        # 示例：
-        # model = genai.GenerativeModel(request_data.model_id)
-        # response = model.generate_content("請總結這段音訊的內容：" + source_basename, stream=False)
-        # simulated_summary_text = response.text
+        # Instantiate Gemini Model
+        model = genai.GenerativeModel(request_data.model_id)
+        logger.info(f"[TASK {task_id}] Gemini model '{request_data.model_id}' instantiated.")
 
-        if "summary_tc" in request_data.output_options or "summary_transcript_tc" in request_data.output_options or "transcript_bilingual_summary" in request_data.output_options:
-            base_summary = f"這是對 '{source_basename}' 使用 '{request_data.model_id}' 模型生成的繁體中文重點摘要的開頭總結段落。\n" \
-                           f"**重點1子標題**\n- 這是第一個重點的第一個細節。\n- 這是第一個重點的第二個細節。\n" \
-                           f"**重點2子標題**\n- 這是第二個重點的第一個細節，它可能比較長一點。\n- 這是第二個重點的第二個細節。"
-            if request_data.custom_prompts and request_data.custom_prompts.get("summary_prompt"):
-                base_summary = f"根據自訂提示詞 '{request_data.custom_prompts['summary_prompt'][:50]}...' 生成的摘要：\n" + base_summary
-            simulated_summary_text = base_summary
-            if "transcript_bilingual_summary" in request_data.output_options: simulated_summary_text += "\n(This is the English part of the bilingual summary.)"
+        # Prompt Selection
+        summary_prompt_to_use = DEFAULT_SUMMARY_PROMPT_PY
+        if request_data.custom_prompts and request_data.custom_prompts.get("summary_prompt"):
+            summary_prompt_to_use = request_data.custom_prompts["summary_prompt"]
+            logger.info(f"[TASK {task_id}] Using custom summary prompt.")
+        else:
+            logger.info(f"[TASK {task_id}] Using default summary prompt.")
 
-        if "summary_transcript_tc" in request_data.output_options or "transcript_bilingual_summary" in request_data.output_options:
-            base_transcript = f"這是 '{source_basename}' 的模擬逐字稿內容的第一段。\n" \
-                              f"這是第二段。\n發言者A：模擬對話開始。\n發言者B：好的。\n第五段，觸發分隔線。\n第六段。"
-            if request_data.custom_prompts and request_data.custom_prompts.get("transcript_prompt"):
-                base_transcript = f"根據自訂提示詞 '{request_data.custom_prompts['transcript_prompt'][:50]}...' 生成的逐字稿：\n" + base_transcript
-            simulated_transcript_text = base_transcript
-            if "transcript_bilingual_summary" in request_data.output_options: simulated_transcript_text = f"(Original Language Transcript for '{source_basename}')\n" + simulated_transcript_text
+        transcript_prompt_to_use = DEFAULT_TRANSCRIPT_PROMPT_PY
+        if request_data.custom_prompts and request_data.custom_prompts.get("transcript_prompt"):
+            transcript_prompt_to_use = request_data.custom_prompts["transcript_prompt"]
+            logger.info(f"[TASK {task_id}] Using custom transcript prompt.")
+        else:
+            logger.info(f"[TASK {task_id}] Using default transcript prompt.")
+
+        actual_summary_text: Optional[str] = None
+        actual_transcript_text: Optional[str] = None
+
+        # Placeholder for actual summary generation
+        if "summary_tc" in request_data.output_options or \
+           "summary_transcript_tc" in request_data.output_options or \
+           "transcript_bilingual_summary" in request_data.output_options:
+            logger.info(f"[TASK {task_id}] Generating summary using model {request_data.model_id} with prompt: '{summary_prompt_to_use[:100]}...'")
+            try:
+                logger.info(f"[TASK {task_id}] Calling Gemini API for summary with model {request_data.model_id}. Audio URI: {audio_file_for_api.uri}")
+                response_summary = model.generate_content(
+                    [summary_prompt_to_use, audio_file_for_api],
+                    generation_config=genai.types.GenerationConfig(
+                        # candidate_count=1, # Ensure only one candidate is generated
+                        # temperature=0.7 # Adjust as needed
+                    )
+                )
+                actual_summary_text = response_summary.text
+                logger.info(f"[TASK {task_id}] Successfully received summary from API. Text length: {len(actual_summary_text)}")
+            except Exception as e_summary:
+                logger.error(f"[TASK {task_id}] Error generating summary via Gemini API: {e_summary}")
+                actual_summary_text = f"Error generating summary: {e_summary}" # Store error message
+
+        # Actual API Call for Transcript
+        if "summary_transcript_tc" in request_data.output_options or \
+           "transcript_bilingual_summary" in request_data.output_options:
+            logger.info(f"[TASK {task_id}] Generating transcript using model {request_data.model_id} with prompt: '{transcript_prompt_to_use[:100]}...'")
+            try:
+                logger.info(f"[TASK {task_id}] Calling Gemini API for transcript with model {request_data.model_id}. Audio URI: {audio_file_for_api.uri}")
+                response_transcript = model.generate_content(
+                    [transcript_prompt_to_use, audio_file_for_api],
+                    generation_config=genai.types.GenerationConfig(
+                        # candidate_count=1,
+                        # temperature=0.7
+                    )
+                )
+                actual_transcript_text = response_transcript.text
+                logger.info(f"[TASK {task_id}] Successfully received transcript from API. Text length: {len(actual_transcript_text)}")
+            except Exception as e_transcript:
+                logger.error(f"[TASK {task_id}] Error generating transcript via Gemini API: {e_transcript}")
+                actual_transcript_text = f"Error generating transcript: {e_transcript}" # Store error message
 
         # 轉換為結構化資料
         structured_summary_data = None
-        if simulated_summary_text:
-            lines = simulated_summary_text.strip().split('\n')
-            intro = lines.pop(0) if lines else ""
-            bilingual_append_text = None
-            if "transcript_bilingual_summary" in request_data.output_options and lines and "(This is the English part" in lines[-1]:
-                bilingual_append_text = lines.pop(-1)
+        logger.info(f"[TASK {task_id}] Parsing summary text (length: {len(actual_summary_text) if actual_summary_text else 0}).")
+        if actual_summary_text and actual_summary_text.startswith("Error generating summary:"):
+            structured_summary_data = {"intro_paragraph": actual_summary_text, "items": []}
+        elif actual_summary_text:
+            lines = [line.strip() for line in actual_summary_text.strip().split('\n') if line.strip()] # Remove empty lines and strip
+            intro = ""
             items = []
             current_item_details = []
             current_subtitle = None
-            for line in lines:
-                if line.startswith("**") and line.endswith("**"):
-                    if current_subtitle:
-                        items.append({"subtitle": current_subtitle.strip('*'), "details": list(current_item_details)})
-                    current_subtitle = line.strip('*')
-                    current_item_details.clear()
-                elif line.startswith("- ") and current_subtitle:
-                    current_item_details.append(line[2:])
-                elif current_subtitle and current_item_details: # 處理多行細節
-                    current_item_details[-1] += "\n" + line
-                elif current_subtitle: # 處理沒有 - 開頭的細節
-                    current_item_details.append(line)
 
-            if current_subtitle: # 添加最後一個項目
-                items.append({"subtitle": current_subtitle.strip('*'), "details": list(current_item_details)})
-            structured_summary_data = {"intro_paragraph": intro, "items": items, "bilingual_append": bilingual_append_text}
+            # Try to find the first paragraph as intro more reliably
+            # The first non-subtitle line could be the intro.
+            # Or, if the first line is not a subtitle, it's the intro.
+            if lines and not re.match(r"^\s*\*\*(.*?)\*\*\s*$", lines[0]):
+                intro = lines.pop(0)
+
+            for line in lines:
+                subtitle_match = re.match(r"^\s*\*\*(.*?)\*\*\s*$", line) # Allow leading/trailing spaces for subtitle
+                if subtitle_match:
+                    if current_subtitle: # Save previous item
+                        items.append({"subtitle": current_subtitle, "details": list(current_item_details)})
+                    current_subtitle = subtitle_match.group(1).strip()
+                    current_item_details.clear()
+                    if not intro and items: # If intro was not captured and we are already into items, means no dedicated intro line
+                        pass
+                elif current_subtitle: # This line is part of current_subtitle's details
+                    detail_text = line
+                    if line.startswith("- "):
+                        detail_text = line[2:].strip()
+
+                    if detail_text: # Add non-empty details
+                        if current_item_details and not line.startswith("- "): # Continuation of previous detail
+                            current_item_details[-1] += "\n" + detail_text
+                        else:
+                            current_item_details.append(detail_text)
+                elif not intro: # If no subtitle context yet, and it's not a subtitle line, it could be part of intro
+                    intro += ("\n" if intro else "") + line
+
+
+            if current_subtitle: # Add the last item
+                items.append({"subtitle": current_subtitle, "details": list(current_item_details)})
+
+            if not items and intro and not actual_summary_text.startswith("Error"): # If no items were parsed, the whole text might be the intro
+                # This check helps if the summary is just a single block of text without specific formatting.
+                pass # intro is already set
+
+            bilingual_append_text = None # This logic was specific to simulation, might remove or adapt if bilingual output is different
+            # if "transcript_bilingual_summary" in request_data.output_options and lines and "(This is the English part" in lines[-1]:
+            #     bilingual_append_text = lines.pop(-1)
+
+            structured_summary_data = {"intro_paragraph": intro.strip(), "items": items, "bilingual_append": bilingual_append_text}
+        else: # actual_summary_text is None or empty
+            structured_summary_data = {"intro_paragraph": "No summary content received or summary was empty.", "items": []}
+        logger.debug(f"[TASK {task_id}] Parsed summary data: intro_len={len(structured_summary_data['intro_paragraph'])}, items_count={len(structured_summary_data['items'])}")
 
         structured_transcript_data = None
-        if simulated_transcript_text:
-            paragraphs_raw = simulated_transcript_text.strip().split('\n')
-            hr_interval = 5
+        logger.info(f"[TASK {task_id}] Parsing transcript text (length: {len(actual_transcript_text) if actual_transcript_text else 0}).")
+        if actual_transcript_text and actual_transcript_text.startswith("Error generating transcript:"):
+            structured_transcript_data = {"paragraphs": [{"content": actual_transcript_text, "is_speaker_line": False, "speaker": None, "insert_hr_after": False}]}
+        elif actual_transcript_text:
+            paragraphs_raw = actual_transcript_text.strip().split('\n')
+            hr_interval = 5 # This can be kept or removed based on desired output styling
             formatted_paragraphs = []
-            bilingual_prepend_text = None
-            if "transcript_bilingual_summary" in request_data.output_options and paragraphs_raw and paragraphs_raw[0].startswith("(Original Language Transcript"):
-                bilingual_prepend_text = paragraphs_raw.pop(0)
+            bilingual_prepend_text = None # This logic was specific to simulation
+            # if "transcript_bilingual_summary" in request_data.output_options and paragraphs_raw and paragraphs_raw[0].startswith("(Original Language Transcript"):
+            #     bilingual_prepend_text = paragraphs_raw.pop(0)
+
             for i, p_text in enumerate(paragraphs_raw):
-                if p_text.strip():
-                    match = re.match(r"^(發言者\s?[A-Za-z0-9]+)[:：]\s*(.*)", p_text)
+                p_text_stripped = p_text.strip()
+                if p_text_stripped: # Process non-empty paragraphs
+                    # Regex for speaker: "發言者 A:", "Speaker B:", "發言者C：", etc.
+                    # Made it more flexible with speaker names (word characters) and colon/space variations.
+                    match = re.match(r"^(發言者\s*[\w\d]+|Speaker\s*[\w\d]+)\s*[:：]\s*(.*)", p_text_stripped, re.IGNORECASE)
                     formatted_paragraphs.append({
-                        "content": match.group(2) if match else p_text,
+                        "content": match.group(2) if match else p_text_stripped,
                         "is_speaker_line": bool(match),
-                        "speaker": match.group(1) if match else None,
-                        "insert_hr_after": (i + 1) % hr_interval == 0 and i < len(paragraphs_raw) - 1
+                        "speaker": match.group(1).strip() if match else None,
+                        "insert_hr_after": (i + 1) % hr_interval == 0 and i < len(paragraphs_raw) - 1 and bool(match) # HR only after speaker lines for now
                     })
             structured_transcript_data = {"bilingual_prepend": bilingual_prepend_text, "paragraphs": formatted_paragraphs}
+        else: # actual_transcript_text is None or empty
+            structured_transcript_data = {"paragraphs": [{"content": "No transcript content received or transcript was empty.", "is_speaker_line": False, "speaker": None, "insert_hr_after": False}]}
+        logger.debug(f"[TASK {task_id}] Parsed transcript data: paragraphs_count={len(structured_transcript_data['paragraphs'])}")
 
         # 檔案生成邏輯
         tasks_db[task_id]["status"] = "generating_report"
-        await asyncio.sleep(1) # 模擬生成報告的時間
+        # await asyncio.sleep(1) # Original delay, can be removed or adjusted
 
         report_title = f"'{source_basename}' 的 AI 分析報告"
         preview_html = generate_html_report_content_via_jinja(report_title, structured_summary_data, structured_transcript_data, request_data.model_id)
@@ -419,6 +510,14 @@ async def process_audio_and_generate_report_task(task_id: str, request_data: Gen
         tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
         logger.error(f"[TASK {task_id}] [ERROR] 背景任務處理失敗: {e}")
         traceback.print_exc()
+    finally:
+        if audio_file_for_api:
+            try:
+                logger.info(f"[TASK {task_id}] Deleting uploaded file {audio_file_for_api.uri} ({audio_file_for_api.name}) from Google Cloud.")
+                genai.delete_file(audio_file_for_api.name) # Use .name for deletion
+                logger.info(f"[TASK {task_id}] Successfully deleted file {audio_file_for_api.uri}.")
+            except Exception as e_delete_file:
+                logger.warning(f"[TASK {task_id}] Failed to delete uploaded file {audio_file_for_api.uri}: {e_delete_file}")
 
 
 # --- 音訊來源處理 API ---
