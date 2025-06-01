@@ -24,6 +24,8 @@ from pytubefix import YouTube
 from pytubefix.exceptions import RegexMatchError, VideoUnavailable, PytubeFixError
 
 import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions # Added import
+import mimetypes # Added import
 
 # --- 配置日誌 (重要) ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -127,17 +129,23 @@ async def startup_event():
     logger.info(f"臨時音訊儲存目錄 '{TEMP_AUDIO_STORAGE_DIR}' 已確認存在。")
     logger.info(f"生成報告儲存目錄 '{GENERATED_REPORTS_DIR}' 已確認存在。")
 
-    # 清理舊的臨時音訊檔案 (簡單示例：清理一天前的檔案)
-    # 實際應用中，可能需要更複雜的清理策略或透過外部排程任務來執行
-    # 注意：這裡只清理 TEMP_AUDIO_STORAGE_DIR，不清理 GENERATED_REPORTS_DIR
-    for filename in os.listdir(TEMP_AUDIO_STORAGE_DIR):
-        file_path = os.path.join(TEMP_AUDIO_STORAGE_DIR, filename)
-        try:
-            if os.path.isfile(file_path) and (datetime.now() - datetime.fromtimestamp(os.path.getmtime(file_path))).days > 1:
-                os.remove(file_path)
-                logger.info(f"已清理過期臨時檔案: {filename}")
-        except Exception as e:
-            logger.warning(f"清理臨時檔案 {filename} 時發生錯誤: {e}")
+    # --- Local Temporary Audio File Cleanup (User Requirement: Disabled) ---
+    # As per user requirements (Task 3, Step 1), the automatic cleanup of
+    # files in TEMP_AUDIO_STORAGE_DIR has been disabled.
+    # The user intends to manage these files manually or via a separate process.
+    #
+    # Original cleanup logic (now commented out):
+    # # 清理舊的臨時音訊檔案 (簡單示例：清理一天前的檔案)
+    # # 實際應用中，可能需要更複雜的清理策略或透過外部排程任務來執行
+    # # 注意：這裡只清理 TEMP_AUDIO_STORAGE_DIR，不清理 GENERATED_REPORTS_DIR
+    # for filename in os.listdir(TEMP_AUDIO_STORAGE_DIR):
+    #     file_path = os.path.join(TEMP_AUDIO_STORAGE_DIR, filename)
+    #     try:
+    #         if os.path.isfile(file_path) and (datetime.now() - datetime.fromtimestamp(os.path.getmtime(file_path))).days > 1:
+    #             os.remove(file_path)
+    #             logger.info(f"已清理過期臨時檔案: {filename}")
+    #     except Exception as e:
+    #         logger.warning(f"清理臨時檔案 {filename} 時發生錯誤: {e}")
 
 
     global global_api_key, api_key_is_valid
@@ -224,6 +232,45 @@ async def check_api_key_status():
         return {"status": "not_set", "message": "API 金鑰尚未設定，請設定 API 金鑰。"}
 
 
+# Helper function to upload audio file to Gemini Files API
+def upload_audio_to_gemini_files(local_file_path: str, task_id_for_log: Optional[str] = "N/A") -> Optional[str]:
+    """
+    Uploads a local audio file to the Gemini Files API.
+
+    Args:
+        local_file_path: The path to the local audio file.
+        task_id_for_log: Optional task ID for logging purposes.
+
+    Returns:
+        The Gemini File API resource name (e.g., "files/xxxxxxxx") if successful, None otherwise.
+    """
+    logger.info(f"[TASK {task_id_for_log}] Starting upload of {local_file_path} to Gemini Files API.")
+    try:
+        inferred_mime_type, _ = mimetypes.guess_type(local_file_path)
+        upload_mime_type = inferred_mime_type
+
+        if inferred_mime_type in ['audio/m4a', 'audio/mp4']: # m4a and mp4 (aac) are common for YouTube downloads
+            upload_mime_type = 'audio/aac'
+            logger.info(f"[TASK {task_id_for_log}] Original MIME type {inferred_mime_type} mapped to {upload_mime_type}.")
+        elif not inferred_mime_type:
+            upload_mime_type = 'application/octet-stream' # Default if type can't be inferred
+            logger.warning(f"[TASK {task_id_for_log}] Could not infer MIME type for {local_file_path}. Defaulting to {upload_mime_type}.")
+        else:
+            logger.info(f"[TASK {task_id_for_log}] Inferred MIME type for {local_file_path}: {inferred_mime_type}. Uploading as {upload_mime_type}.")
+
+        # Synchronous call, as this helper is expected to be run in a thread by the calling task.
+        uploaded_file = genai.upload_file(path=local_file_path, mime_type=upload_mime_type)
+
+        logger.info(f"[TASK {task_id_for_log}] Successfully uploaded {local_file_path} to Gemini Files API. File name: {uploaded_file.name}")
+        return uploaded_file.name # Return the resource name like "files/xxxxxxxx"
+    except google_exceptions.GoogleAPIError as e:
+        logger.error(f"[TASK {task_id_for_log}] Gemini API error during file upload for {local_file_path}: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"[TASK {task_id_for_log}] An unexpected error occurred during file upload for {local_file_path}: {e}")
+        return None
+
+
 # --- 輔助函式 (sanitize_filename, generate_html_report_content_via_jinja) ---
 def sanitize_base_filename(title: str, max_length: int = 50) -> str:
     if not title: title = "untitled_audio"
@@ -260,91 +307,189 @@ async def process_audio_and_generate_report_task(task_id: str, request_data: Gen
         tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
         logger.error(f"[TASK {task_id}] [ERROR] 失敗 - API 金鑰無效。"); return
 
+    # Upload the audio file to Gemini Files API
+    # This is a synchronous call, but process_audio_and_generate_report_task is run in a ThreadPoolExecutor
+    gemini_file_name = upload_audio_to_gemini_files(request_data.source_path, task_id)
+
+    if gemini_file_name is None:
+        logger.error(f"[TASK {task_id}] [ERROR] Failed to upload audio file to Gemini Files API. Aborting task.")
+        tasks_db[task_id]["status"] = "failed"
+        tasks_db[task_id]["error_message"] = "音訊檔案上傳至 Gemini API 失敗，無法繼續處理。"
+        tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
+        # As per user requirements (Task 3, Step 3), do not delete the local source file
+        # even if the upload to Gemini Files API fails.
+        # The user intends to manage local files manually or via a separate process.
+        #
+        # Original local file cleanup logic (now removed):
+        # if os.path.exists(request_data.source_path):
+        #     try:
+        #         os.remove(request_data.source_path)
+        #         logger.info(f"[TASK {task_id}] Cleaned up temporary file after failed upload: {request_data.source_path}")
+        #     except OSError as e:
+        #         logger.error(f"[TASK {task_id}] Error deleting temporary file {request_data.source_path} after failed upload: {e}")
+        return
+
+    logger.info(f"[TASK {task_id}] Gemini File Name (Resource Identifier): {gemini_file_name}")
+
+    raw_response_text = None
+    simulated_summary_text = None # Renaming for clarity, will hold extracted summary
+    simulated_transcript_text = None # Renaming for clarity, will hold extracted transcript
+    source_basename = os.path.basename(request_data.source_path) # Keep for report title
+
     try:
-        # 模擬 AI 輸出和結構化資料轉換邏輯
-        # 這裡應該是實際調用 genai API 的地方
-        await asyncio.sleep(5 + len(tasks_db) * 0.5) # 調整模擬延時
+        logger.info(f"[TASK {task_id}] Initializing Gemini model: {request_data.model_id}")
+        model = genai.GenerativeModel(request_data.model_id)
 
-        simulated_summary_text: Optional[str] = None
-        simulated_transcript_text: Optional[str] = None
-        source_basename = os.path.basename(request_data.source_path)
+        logger.info(f"[TASK {task_id}] Retrieving File object for {gemini_file_name}")
+        uploaded_file_reference = genai.get_file(name=gemini_file_name)
+        # At this point, uploaded_file_reference.mime_type could be checked if needed,
+        # but we trust the mime_type used during upload.
 
-        # 根據 output_options 和 custom_prompts 生成模擬內容
-        # 這裡可以加入 genai.GenerativeModel().generate_content() 的實際呼叫
-        # 示例：
-        # model = genai.GenerativeModel(request_data.model_id)
-        # response = model.generate_content("請總結這段音訊的內容：" + source_basename, stream=False)
-        # simulated_summary_text = response.text
+        content_for_api = [CORE_GEMINI_AUDIO_PROMPT_TW, uploaded_file_reference]
 
-        if "summary_tc" in request_data.output_options or "summary_transcript_tc" in request_data.output_options or "transcript_bilingual_summary" in request_data.output_options:
-            base_summary = f"這是對 '{source_basename}' 使用 '{request_data.model_id}' 模型生成的繁體中文重點摘要的開頭總結段落。\n" \
-                           f"**重點1子標題**\n- 這是第一個重點的第一個細節。\n- 這是第一個重點的第二個細節。\n" \
-                           f"**重點2子標題**\n- 這是第二個重點的第一個細節，它可能比較長一點。\n- 這是第二個重點的第二個細節。"
-            if request_data.custom_prompts and request_data.custom_prompts.get("summary_prompt"):
-                base_summary = f"根據自訂提示詞 '{request_data.custom_prompts['summary_prompt'][:50]}...' 生成的摘要：\n" + base_summary
-            simulated_summary_text = base_summary
-            if "transcript_bilingual_summary" in request_data.output_options: simulated_summary_text += "\n(This is the English part of the bilingual summary.)"
+        logger.info(f"[TASK {task_id}] Sending request to Gemini API with prompt and audio file.")
+        # Note: custom_prompts are explicitly not used here as per requirements.
+        response = model.generate_content(content_for_api, stream=False)
 
-        if "summary_transcript_tc" in request_data.output_options or "transcript_bilingual_summary" in request_data.output_options:
-            base_transcript = f"這是 '{source_basename}' 的模擬逐字稿內容的第一段。\n" \
-                              f"這是第二段。\n發言者A：模擬對話開始。\n發言者B：好的。\n第五段，觸發分隔線。\n第六段。"
-            if request_data.custom_prompts and request_data.custom_prompts.get("transcript_prompt"):
-                base_transcript = f"根據自訂提示詞 '{request_data.custom_prompts['transcript_prompt'][:50]}...' 生成的逐字稿：\n" + base_transcript
-            simulated_transcript_text = base_transcript
-            if "transcript_bilingual_summary" in request_data.output_options: simulated_transcript_text = f"(Original Language Transcript for '{source_basename}')\n" + simulated_transcript_text
+        # Extract text - response.text should be used for non-streaming, non-function calling responses
+        raw_response_text = response.text
+        logger.info(f"[TASK {task_id}] Received raw response from Gemini API.")
+        # logger.debug(f"[TASK {task_id}] Raw response: {raw_response_text[:500]}...") # Log a snippet
 
-        # 轉換為結構化資料
+        # Parse the raw response text
+        summary_match = re.search(r"\[重點摘要開始\](.*?)\[重點摘要結束\]", raw_response_text, re.DOTALL)
+        transcript_match = re.search(r"\[詳細逐字稿開始\](.*?)\[詳細逐字稿結束\]", raw_response_text, re.DOTALL)
+
+        if summary_match:
+            simulated_summary_text = summary_match.group(1).strip()
+            logger.info(f"[TASK {task_id}] Extracted summary from response.")
+        else:
+            logger.warning(f"[TASK {task_id}] Could not find summary markers in response. Summary will be empty.")
+            simulated_summary_text = None # Ensure it's None if not found
+
+        if transcript_match:
+            simulated_transcript_text = transcript_match.group(1).strip()
+            logger.info(f"[TASK {task_id}] Extracted transcript from response.")
+        else:
+            logger.warning(f"[TASK {task_id}] Could not find transcript markers in response. Transcript will be empty.")
+            simulated_transcript_text = None # Ensure it's None if not found
+
+        if not simulated_summary_text and not simulated_transcript_text:
+            logger.error(f"[TASK {task_id}] Failed to extract both summary and transcript from Gemini response. Markers might be missing or response format incorrect.")
+            # Consider this a failure if both are missing
+            raise ValueError("關鍵標記 (重點摘要或詳細逐字稿) 未在模型回應中找到。")
+
+    except (google_exceptions.GoogleAPIError,
+            google_exceptions.RetryError, # For network/retryable issues
+            genai.types.BlockedPromptException, # If prompt is blocked
+            genai.types.GenerationValidationException, # If response validation fails
+            ValueError # For our custom value error above
+            ) as e:
+        error_message = f"呼叫 Gemini API 或處理其回應時發生錯誤: {type(e).__name__} - {str(e)}"
+        logger.error(f"[TASK {task_id}] [ERROR] {error_message}")
+        tasks_db[task_id]["status"] = "failed"
+        tasks_db[task_id]["error_message"] = error_message
+        tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
+        # No local file cleanup here, as it's handled by upload failure or outer try/finally for Gemini file
+        return # Exit after setting error status
+    except Exception as e: # Catch-all for other unexpected errors
+        error_message = f"處理音訊時發生未預期錯誤: {type(e).__name__} - {str(e)}"
+        logger.error(f"[TASK {task_id}] [ERROR] {error_message}")
+        traceback.print_exc()
+        tasks_db[task_id]["status"] = "failed"
+        tasks_db[task_id]["error_message"] = error_message
+        tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
+        return # Exit after setting error status
+    finally:
+        # Clean up the file from Gemini Files API regardless of success or failure of generate_content
+        if gemini_file_name:
+            try:
+                logger.info(f"[TASK {task_id}] Attempting to delete file {gemini_file_name} from Gemini Files API.")
+                genai.delete_file(name=gemini_file_name)
+                logger.info(f"[TASK {task_id}] Successfully deleted file {gemini_file_name} from Gemini Files API.")
+            except Exception as e_delete:
+                # Log error but don't let it crash the task or override original error
+                logger.error(f"[TASK {task_id}] [ERROR] Failed to delete file {gemini_file_name} from Gemini Files API: {e_delete}")
+
+    # If we've reached here and raw_response_text is None, it means an error handled by the `return` in except block.
+    # This check is mostly a safeguard.
+    if raw_response_text is None and tasks_db[task_id]["status"] != "failed":
+        logger.error(f"[TASK {task_id}] [ERROR] Reached processing stage with no API response and no failure status. This should not happen.")
+        tasks_db[task_id]["status"] = "failed"
+        tasks_db[task_id]["error_message"] = "未知的內部錯誤，無法獲取 AI 模型回應。"
+        tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
+        return
+
+    # Proceed with structuring data if summary or transcript text was found
+    try:
+        # 轉換為結構化資料 (reusing existing logic with new variable names)
         structured_summary_data = None
-        if simulated_summary_text:
+        if simulated_summary_text: # Use the extracted summary
             lines = simulated_summary_text.strip().split('\n')
             intro = lines.pop(0) if lines else ""
-            bilingual_append_text = None
-            if "transcript_bilingual_summary" in request_data.output_options and lines and "(This is the English part" in lines[-1]:
-                bilingual_append_text = lines.pop(-1)
+            # bilingual_append_text is not relevant here as CORE_GEMINI_AUDIO_PROMPT_TW specifies TW Chinese.
+            # if "transcript_bilingual_summary" in request_data.output_options and lines and "(This is the English part" in lines[-1]:
+            #     bilingual_append_text = lines.pop(-1)
+            bilingual_append_text = None # Explicitly set to None
             items = []
             current_item_details = []
             current_subtitle = None
             for line in lines:
-                if line.startswith("**") and line.endswith("**"):
+                if line.startswith("**") and line.endswith("**"): # Assuming AI follows this for subtitles
                     if current_subtitle:
                         items.append({"subtitle": current_subtitle.strip('*'), "details": list(current_item_details)})
                     current_subtitle = line.strip('*')
                     current_item_details.clear()
                 elif line.startswith("- ") and current_subtitle:
                     current_item_details.append(line[2:])
-                elif current_subtitle and current_item_details: # 處理多行細節
+                elif current_subtitle and current_item_details: # Handle multi-line details
                     current_item_details[-1] += "\n" + line
-                elif current_subtitle: # 處理沒有 - 開頭的細節
+                elif current_subtitle: # Handle details not starting with "-"
                     current_item_details.append(line)
+                # If line doesn't fit above and there's no current_subtitle, it might be part of intro or ignored.
+                # Consider if intro should capture more lines if no subtitles are present.
+                # For now, this matches existing logic.
 
-            if current_subtitle: # 添加最後一個項目
+            if current_subtitle: # Add the last item
                 items.append({"subtitle": current_subtitle.strip('*'), "details": list(current_item_details)})
             structured_summary_data = {"intro_paragraph": intro, "items": items, "bilingual_append": bilingual_append_text}
 
         structured_transcript_data = None
-        if simulated_transcript_text:
+        if simulated_transcript_text: # Use the extracted transcript
             paragraphs_raw = simulated_transcript_text.strip().split('\n')
-            hr_interval = 5
+            hr_interval = 5 # This can be kept or removed if not desired for AI output
             formatted_paragraphs = []
-            bilingual_prepend_text = None
-            if "transcript_bilingual_summary" in request_data.output_options and paragraphs_raw and paragraphs_raw[0].startswith("(Original Language Transcript"):
-                bilingual_prepend_text = paragraphs_raw.pop(0)
+            # bilingual_prepend_text is not relevant here.
+            # if "transcript_bilingual_summary" in request_data.output_options and paragraphs_raw and paragraphs_raw[0].startswith("(Original Language Transcript"):
+            #     bilingual_prepend_text = paragraphs_raw.pop(0)
+            bilingual_prepend_text = None # Explicitly set to None
             for i, p_text in enumerate(paragraphs_raw):
-                if p_text.strip():
-                    match = re.match(r"^(發言者\s?[A-Za-z0-9]+)[:：]\s*(.*)", p_text)
+                if p_text.strip(): # Ensure non-empty lines
+                    # Updated regex to be more flexible with speaker labels (e.g., "發言者A:", "Speaker B：", "旁白:")
+                    match = re.match(r"^(發言者\s?[A-Za-z0-9]+|Speaker\s?[A-Za-z0-9]+|旁白)[:：]\s*(.*)", p_text)
                     formatted_paragraphs.append({
-                        "content": match.group(2) if match else p_text,
+                        "content": match.group(2).strip() if match else p_text.strip(),
                         "is_speaker_line": bool(match),
-                        "speaker": match.group(1) if match else None,
+                        "speaker": match.group(1).strip() if match else None,
                         "insert_hr_after": (i + 1) % hr_interval == 0 and i < len(paragraphs_raw) - 1
                     })
             structured_transcript_data = {"bilingual_prepend": bilingual_prepend_text, "paragraphs": formatted_paragraphs}
 
-        # 檔案生成邏輯
-        tasks_db[task_id]["status"] = "generating_report"
-        await asyncio.sleep(1) # 模擬生成報告的時間
+        if not structured_summary_data and not structured_transcript_data and tasks_db[task_id]["status"] != "failed":
+             # This case means parsing was successful but yielded no actual content from the AI's text.
+            logger.warning(f"[TASK {task_id}] AI response was parsed, but no structured summary or transcript could be derived. The AI might have responded off-format.")
+            # Depending on strictness, this could be a failure. For now, allow generating a report that indicates this.
+            # tasks_db[task_id]["error_message"] = "AI 回應格式正確，但未包含有效的摘要或逐字稿內容。"
+            # tasks_db[task_id]["status"] = "failed" # Optionally mark as failed
+            # tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
+            # return
 
-        report_title = f"'{source_basename}' 的 AI 分析報告"
+
+        # 檔案生成邏輯 (remains largely the same, uses structured_summary_data and structured_transcript_data)
+        tasks_db[task_id]["status"] = "generating_report"
+        # await asyncio.sleep(1) # Removed: No longer simulating report generation time, actual AI call was the delay
+
+        report_title = f"'{source_basename}' 的 AI 分析報告 (由 {request_data.model_id} 生成)" # Added model_id to title
         preview_html = generate_html_report_content_via_jinja(report_title, structured_summary_data, structured_transcript_data, request_data.model_id)
 
         base_report_filename = f"{sanitize_base_filename(source_basename, 30)}_{request_data.model_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
@@ -415,10 +560,11 @@ async def process_audio_and_generate_report_task(task_id: str, request_data: Gen
 
     except Exception as e:
         tasks_db[task_id]["status"] = "failed"
-        tasks_db[task_id]["error_message"] = f"背景任務處理失敗: {str(e)}"
+        tasks_db[task_id]["error_message"] = f"報告資料結構化或檔案生成時發生錯誤: {type(e).__name__} - {str(e)}"
         tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
-        logger.error(f"[TASK {task_id}] [ERROR] 背景任務處理失敗: {e}")
+        logger.error(f"[TASK {task_id}] [ERROR] 報告資料結構化或檔案生成時錯誤: {e}")
         traceback.print_exc()
+        # Note: Gemini file cleanup is handled by the outer finally block.
 
 
 # --- 音訊來源處理 API ---
@@ -542,6 +688,27 @@ PREDEFINED_MODELS_DATA_APP = {
     }
     # 您可以根據需要加入更多預定義模型和它們的中文資訊
 }
+
+CORE_GEMINI_AUDIO_PROMPT_TW = """
+# 角色扮演指令
+你是一位專業的逐字稿與重點摘要分析師。你的任務是根據我提供的音訊內容，產出結構化的「重點摘要」與「詳細逐字稿」。
+
+# 語言與風格要求
+請務必使用**繁體中文（台灣用語習慣）**來書寫所有內容。
+
+# 輸出格式要求
+你必須嚴格依照以下格式輸出，不可省略任何標記：
+
+[重點摘要開始]
+(此處填寫重點摘要內容，請提供條列式或分點的摘要，每個重點前可以有子標題)
+[重點摘要結束]
+
+---[逐字稿分隔線]---
+
+[詳細逐字稿開始]
+(此處填寫詳細逐字稿內容，若能識別不同發言者，請標註，例如：發言者A：內容。)
+[詳細逐字稿結束]
+"""
 
 def get_model_version_score(api_name_lower: str) -> int:
     score = 9999 # 預設較低優先級
