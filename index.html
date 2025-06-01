@@ -1,0 +1,194 @@
+
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title if title else "AI_paper 智能助理 v2.2" }}</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+</head>
+<body class="dark-mode font-medium">
+    <header class="app-header">
+        <div class="container header-container">
+            <div class="logo-title">
+                <h1 class="gemini-logo-text">AI_paper</h1>
+            </div>
+            <div class="controls-cluster">
+                <div id="font-size-controls" class="control-group">
+                    <button id="font-decrease-btn" class="control-btn" title="縮小字體"><i class="fas fa-font" style="font-size: 0.8em;"></i>-</button>
+                    <button id="font-default-btn" class="control-btn active" title="預設字體">A</button>
+                    <button id="font-increase-btn" class="control-btn" title="放大字體"><i class="fas fa-font" style="font-size: 0.8em;"></i>+</button>
+                </div>
+                <div id="theme-controls" class="control-group">
+                    <button id="theme-toggle-btn" class="control-btn" title="切換主題模式">
+                        <i class="fas fa-sun"></i> 亮色
+                    </button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <nav class="quick-nav">
+        <div class="container quick-nav-container">
+            <a href="#input-section" class="quick-nav-link"><i class="fas fa-file-audio"></i> 音訊來源</a>
+            <a href="#api-key-section" class="quick-nav-link"><i class="fas fa-key"></i> API金鑰</a>
+            <a href="#config-section" class="quick-nav-link"><i class="fas fa-cogs"></i> 分析設定</a>
+            <a href="#task-queue-section" class="quick-nav-link"><i class="fas fa-list-ol"></i> 任務佇列</a>
+            <a href="#status-section" class="quick-nav-link"><i class="fas fa-tasks"></i> 處理日誌</a>
+            <a href="#result-section" class="quick-nav-link"><i class="fas fa-file-invoice"></i> 分析結果</a>
+        </div>
+    </nav>
+
+    <main class="container content-wrapper">
+        <section id="input-section" class="card animated">
+            <h2><i class="fas fa-file-audio icon-accent"></i> 步驟 1: 提供音訊來源</h2>
+            <div class="input-source-selector">
+                <label class="radio-label">
+                    <input type="radio" name="source_type" value="youtube" checked>
+                    <span class="radio-custom"></span> YouTube 網址
+                </label>
+                <label class="radio-label">
+                    <input type="radio" name="source_type" value="upload">
+                    <span class="radio-custom"></span> 上傳音訊檔案
+                </label>
+            </div>
+
+            <div id="youtube-input-area" class="input-area-content">
+                <label for="youtube-url">YouTube 影片網址:</label>
+                <input type="url" id="youtube-url" name="youtube-url" placeholder="例如: https://www.youtube.com/watch?v=...7">
+            </div>
+
+            <div id="upload-input-area" class="input-area-content" style="display:none;">
+                <label for="audio-file-input" class="file-input-label btn btn-secondary">
+                    <i class="fas fa-cloud-upload-alt"></i> 選擇音訊檔案...
+                </label>
+                <input type="file" id="audio-file-input" name="audio-file" accept="audio/*" style="display:none;">
+                <div id="file-upload-info" class="file-info">未選擇任何檔案</div>
+            </div>
+            <button id="submit-source-btn" class="btn btn-primary icon-btn"><i class="fas fa-arrow-right"></i> 提交來源並繼續</button>
+        </section>
+
+        <section id="api-key-section" class="card animated">
+            <h2><i class="fas fa-key icon-accent"></i> API 金鑰設定</h2>
+            <div id="api-key-status-message" class="status-message">正在檢查金鑰狀態...</div>
+            <div class="form-group">
+                <label for="api-key-input">臨時 API 金鑰 (若上方提示未設定或無效):</label>
+                <div class="api-key-input-container">
+            <input type="password" id="api-key-input" placeholder="貼上您的 Google Gemini API 金鑰" class="api-key-input-field">
+            <button id="submit-api-key-btn" class="btn btn-secondary btn-sm api-key-submit-button">設定臨時金鑰</button>
+        </div>
+                <p class="help-text">此金鑰僅用於本次操作，不會被永久儲存。建議使用 Colab Secrets 功能設定。</p>
+            </div>
+            <button id="how-to-set-api-key-btn" class="btn btn-link"><i class="fas fa-info-circle"></i> 如何獲取與設定 API 金鑰？</button>
+            <div id="api-key-instructions-modal" class="modal" style="display:none;">
+                <div class="modal-content">
+                    <span class="close-button" onclick="document.getElementById('api-key-instructions-modal').style.display='none'">&times;</span>
+                    <h3>獲取與設定 Google Gemini API 金鑰</h3>
+                    <h4>1. 獲取 API 金鑰</h4>
+                    <p>您可以前往 <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" class="gai-studio-link">Google AI Studio</a> 獲取您的 API 金鑰。您可能需要登入 Google 帳戶並同意相關條款。</p>
+                    <h4>2. 在 Colab 中設定 (推薦方式)</h4>
+                    <ol>
+                        <li>在 Colab 筆記本左側邊欄，點擊鑰匙圖示的「密鑰」(Secrets)。</li>
+                        <li>點擊「新增密鑰」。</li>
+                        <li>在「名稱」欄位輸入 <code>GOOGLE_API_KEY</code>。</li>
+                        <li>在「值」欄位貼上您獲取的 API 金鑰。</li>
+                        <li>勾選「授予筆記本對此密鑰的存取權限」(Notebook access)。</li>
+                        <li>完成後，此應用程式將能自動讀取金鑰。</li>
+                    </ol>
+                    <h4>3. 行動裝置操作指南</h4>
+                    <p>在手機等行動裝置上操作 Colab 的「密鑰」功能可能較為不便。建議您：</p>
+                    <ul>
+                        <li>優先在桌面電腦的 Colab 環境中設定好 <code>GOOGLE_API_KEY</code> 密鑰。</li>
+                        <li>若臨時需要在手機上操作，可使用上方的「臨時 API 金鑰」輸入框。請從安全來源複製金鑰，並注意資訊安全。</li>
+                    </ul>
+                    <h4>4. 安全提示</h4>
+                    <p>API 金鑰非常重要，請妥善保管，不要分享給他人或在不安全的環境中明文儲存。</p>
+                </div>
+            </div>
+        </section>
+
+        <section id="config-section" class="card animated" style="display:none;">
+            <h2><i class="fas fa-cogs icon-accent"></i> 步驟 2: 設定分析選項</h2>
+            <div class="form-group">
+                <label for="ai-model-select">選擇 AI 模型:</label>
+                <select id="ai-model-select" name="ai-model">
+                    <option value="">-- 正在載入模型 --</option>
+                </select>
+                <div id="model-info-display" class="model-info" style="display:none;">
+                    {/* 模型詳細資訊將由 JS 填充於此 */}
+                </div>
+            </div>
+            <div class="form-group">
+                <p class="options-title">主要輸出內容 (預設為 B):</p>
+                <div class="radio-group">
+                    <label class="radio-label"><input type="radio" name="main_output" value="summary_tc" > <span class="radio-custom"></span> A: 僅繁中摘要</label>
+                    <label class="radio-label"><input type="radio" name="main_output" value="summary_transcript_tc" checked> <span class="radio-custom"></span> B: 繁中摘要與逐字稿</label>
+                    <label class="radio-label"><input type="radio" name="main_output" value="transcript_bilingual_summary"> <span class="radio-custom"></span> C: 原文逐字稿與雙語摘要</label>
+                </div>
+            </div>
+            <div class="form-group">
+                <p class="options-title">額外檔案下載格式 (可複選):</p>
+                <div class="checkbox-group">
+                    <label class="checkbox-label"><input type="checkbox" name="extra_format" value="md"> <span class="checkbox-custom"></span> Markdown (.md)</label>
+                    <label class="checkbox-label"><input type="checkbox" name="extra_format" value="txt"> <span class="checkbox-custom"></span> 純文字 (.txt)</label>
+                    {/* HTML 下載是預設包含的，不在此處作為選項 */}
+                </div>
+            </div>
+
+            <div class="form-group advanced-prompts">
+                <details>
+                    <summary><i class="fas fa-chevron-right"></i> 進階提示詞設定 (選填)</summary>
+                    <div class="form-group">
+                        <label for="custom-summary-prompt">摘要生成提示詞:</label>
+                        <textarea id="custom-summary-prompt" rows="3" placeholder="輸入自訂的摘要生成提示詞，留空則使用預設值。"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="custom-transcript-prompt">逐字稿風格指示:</label>
+                        <textarea id="custom-transcript-prompt" rows="3" placeholder="輸入自訂的逐字稿風格指示，留空則使用預設值。"></textarea>
+                    </div>
+                </details>
+            </div>
+
+            <button id="start-analysis-btn" class="btn btn-primary icon-btn"><i class="fas fa-magic"></i> 開始分析</button>
+        </section>
+
+        <section id="task-queue-section" class="card animated" style="display:none;">
+            <h2><i class="fas fa-list-ol icon-accent"></i> 即時任務佇列</h2>
+            <div id="task-queue-container">
+                <p>目前沒有正在處理的任務。</p>
+                {/* 任務列表將由 JS 動態生成於此 */}
+            </div>
+        </section>
+
+        <section id="status-section" class="card animated" style="display:none;">
+            <h2><i class="fas fa-tasks icon-accent"></i> 處理日誌</h2>
+            <pre id="status-log" aria-live="polite"></pre> {/* aria-live for screen readers */}
+        </section>
+
+        <section id="result-section" class="card animated" style="display:none;">
+            <h2><i class="fas fa-file-invoice icon-accent-green"></i> 分析結果 (<span id="current-result-task-name"></span>)</h2>
+            <div id="report-output-area">
+                {/* 後端生成的 HTML 報告內容將插入此處 */}
+            </div>
+            <div id="download-links-container" style="margin-top: 20px;">
+                <h3><i class="fas fa-download"></i> 下載報告檔案:</h3>
+                <div id="download-links">
+                    {/* 下載連結將由 JS 動態生成 */}
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="app-footer">
+        <div class="container">
+            <p>&copy; AI_paper <span id="current-year"></span>. 專為音訊分析而生。</p>
+        </div>
+    </footer>
+
+    <script src="/static/main.js"></script>
+</body>
+</html>
