@@ -29,6 +29,101 @@ import google.generativeai as genai
 DEFAULT_SUMMARY_PROMPT_PY = "請提供這份文件的繁體中文摘要，風格應專業且資訊豐富，包含一個引人入勝的開頭段落，接著列出3-5個帶有子標題的關鍵重點，每個重點應有2-3個詳細說明。語言風格：專業、學術、客觀。"
 DEFAULT_TRANSCRIPT_PROMPT_PY = "請將這份音訊逐字稿轉換成繁體中文，並修正明顯的語法錯誤或口語贅詞，使其更流暢易讀。如果音檔內容包含多位發言者，請盡可能標示出不同的發言者 (例如：發言者A, 發言者B)。"
 
+# --- P-Prompt Definitions ---
+P1_AUDIO_TO_TC_TRANSCRIPT = DEFAULT_TRANSCRIPT_PROMPT_PY
+
+P2_AUDIO_TO_ORIGINAL_TRANSCRIPT = """# 提示詞 P2: 音訊轉原文逐字稿
+
+## 任務說明:
+請將提供的音訊檔案(檔案名稱: `{audio_filename}`, 原始影片標題: `{video_title}`)轉換為一份"詳細的原文逐字稿".
+
+## 指示:
+1.  **語言:** 請以音訊中實際使用的語言進行逐字稿的撰寫. 如果音訊中包含多種語言混合(例如中文夾雜英文, 或英文夾雜日文等), 請在逐字稿中"完整如實地呈現"這種多語言混合情況, 無需翻譯成單一語言.
+2.  **準確性:** 力求準確捕捉所有口語內容.
+3.  **格式:**
+    * 逐字稿應為純文字格式.
+    * 如果音訊中有多位發言者, 請盡可能嘗試區分(例如: Speaker A:, Speaker B:, 發言者甲:). 若難以區分,則無需特別標註.
+    * 對於專有名詞, 品牌名稱, 人名等, 請依照其在音訊中被讀出的原始語言呈現.
+4.  **內容:** 請勿添加任何非口語內容的摘要, 評論或註解. 只需提供純粹的逐字稿.
+5.  **時間戳記:** 請勿包含任何時間戳記.
+"""
+
+P3_TC_TRANSCRIPT_TO_TC_SUMMARY = DEFAULT_SUMMARY_PROMPT_PY
+
+P4_ORIGINAL_TRANSCRIPT_TO_TC_SUMMARY = """# 提示詞 P4: 從原文逐字稿生成繁體中文重點摘要
+
+## 任務說明:
+您將收到一段"音訊原文逐字稿"的文字內容(此逐字稿可能包含多種語言). 請根據此逐字稿, 理解其核心思想, 並生成一份精煉、準確的"繁體中文重點摘要".
+
+## 指示:
+1.  **目標語言:** 摘要的全部內容必須使用繁體中文(台灣用語習慣).
+2.  **結構與格式要求(請嚴格遵守):**
+    * **開頭段落:** 首先, 撰寫一個簡短的段落(繁體中文), 清晰地概括整個逐字稿的整體主旨、核心議題或主要觀點.
+    * **重點條目:** 接著, 列出數個(建議3-5個)主要的重點條目(繁體中文).
+        * 每個重點條目必須有一個以 `<strong>` HTML 標籤包裹的**粗體**子標題, 並以數字編號(例如:"<strong>1. 主題一:[子標題文字]</strong>").
+        * 在每個粗體子標題下方, 使用無序列表 (`<ul>` 和 `<li>` HTML 標籤) 的形式, 簡潔地列出該重點下的 2-4 個關鍵細節或支撐論點(繁體中文). 每個 `<li>` 內的文字應精煉.
+3.  **內容要求:**
+    * 摘要內容應忠實反映逐字稿的核心思想和關鍵資訊, 避免加入個人詮釋或逐字稿中未提及的內容.
+    * 文字應精煉、準確、易於理解.
+4.  **請勿包含:**
+    * 任何時間戳記.
+    * "重點摘要"或類似的標題文字. 請直接以開頭段落開始您的回應.
+
+## 待處理的音訊原文逐字稿內容:
+---[逐字稿文字開始]---
+{original_transcript_text}
+---[逐字稿文字結束]---
+"""
+
+P5_ORIGINAL_TRANSCRIPT_TO_EN_SUMMARY = """# Prompt P5: Generate English Key Summary from Original Transcript
+
+## Task Description:
+You will receive the text of an "Original Audio Transcript" (this transcript may contain multiple languages). Based on this transcript, understand its core ideas and generate a concise and accurate "English Key Summary".
+
+## Instructions:
+1.  **Target Language:** The entire summary must be in English.
+2.  **Structure and Formatting Requirements (Please adhere strictly):**
+    * **Opening Paragraph:** First, write a brief paragraph (in English) that clearly summarizes the overall theme, core issues, or main points of the entire transcript.
+    * **Key Points:** Then, list several (3-5 recommended) main key points (in English).
+        * Each key point must have a **bold** subheading using `<strong>` HTML tags and be numbered (e.g., "<strong>1. Topic One: [Subheading Text]</strong>").
+        * Below each bold subheading, use an unordered list (with `<ul>` and `<li>` HTML tags) to concisely list 2-4 key details or supporting arguments for that point (in English). Each `<li>` should contain refined text.
+3.  **Content Requirements:**
+    * The summary should faithfully reflect the core ideas and key information from the transcript, avoiding personal interpretations or information not mentioned in the transcript.
+    * The text should be concise, accurate, and easy to understand.
+4.  **Do Not Include:**
+    * Any timestamps.
+    * Titles like "Key Summary". Please begin your response directly with the opening paragraph.
+
+## Original Audio Transcript to Process:
+---[Transcript Text Start]---
+{original_transcript_text}
+---[Transcript Text End]---
+"""
+
+# Standardize punctuation for all relevant prompts
+prompt_names_to_standardize = [
+    "DEFAULT_SUMMARY_PROMPT_PY", "DEFAULT_TRANSCRIPT_PROMPT_PY",
+    "P2_AUDIO_TO_ORIGINAL_TRANSCRIPT",
+    "P4_ORIGINAL_TRANSCRIPT_TO_TC_SUMMARY", "P5_ORIGINAL_TRANSCRIPT_TO_EN_SUMMARY"
+]
+
+punctuation_map = {
+    '（': '(', '）': ')', '：': ':', '，': ',', '。': '.',
+    '「': '"', '」': '"', '『': '"', '』': '"', '、': ','
+}
+
+for name in prompt_names_to_standardize:
+    if name in globals():
+        current_value = globals()[name]
+        for full, half in punctuation_map.items():
+            current_value = current_value.replace(full, half)
+        globals()[name] = current_value
+
+# Re-assign P1 and P3 after their base prompts are standardized
+P1_AUDIO_TO_TC_TRANSCRIPT = DEFAULT_TRANSCRIPT_PROMPT_PY
+P3_TC_TRANSCRIPT_TO_TC_SUMMARY = DEFAULT_SUMMARY_PROMPT_PY
+
+
 # --- 配置日誌 (重要) ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -66,7 +161,7 @@ report_content_template_str = """
 <div id='report-summary' class='report-content'>
   <h3><i class='fas fa-lightbulb icon-accent'></i> 重點摘要</h3>
   {% if summary_data.intro_paragraph %}
-    <p class='intro-paragraph'>{{ summary_data.intro_paragraph }}</p>
+    <div class='intro-paragraph-container'>{{ summary_data.intro_paragraph | safe }}</div>
   {% endif %}
   {% if summary_data.items %}
     {% for item in summary_data.items %}
@@ -239,6 +334,11 @@ def sanitize_base_filename(title: str, max_length: int = 50) -> str:
     if title.startswith('.'): title = "_" + title[1:]
     return title[:max_length]
 
+def sanitize_model_id_for_filename(model_id: str) -> str:
+    sanitized = model_id.replace("models/", "").replace("/", "_")
+    # Further sanitization can be added if other problematic characters are found
+    return sanitized
+
 def generate_html_report_content_via_jinja(report_title: str, summary_data: Optional[Dict], transcript_data: Optional[Dict], model_id: str) -> str:
     try:
         return report_content_jinja_template.render(
@@ -276,7 +376,7 @@ async def process_audio_and_generate_report_task(task_id: str, request_data: Gen
         logger.info(f"[TASK {task_id}] Starting audio file upload for: {request_data.source_path}")
         try:
             audio_file_for_api = genai.upload_file(path=request_data.source_path)
-            logger.info(f"[TASK {task_id}] Successfully uploaded audio file. File ID: {audio_file_for_api.name}, URI: {audio_file_for_api.uri}")
+            logger.info(f"[TASK {task_id}] Successfully uploaded audio file. File ID: {audio_file_for_api.name}, URI: {audio_file_for_api.uri}. Initial state: {audio_file_for_api.state}")
         except Exception as e_upload:
             logger.error(f"[TASK {task_id}] Error uploading audio file: {e_upload}")
             tasks_db[task_id]["status"] = "failed"
@@ -284,74 +384,224 @@ async def process_audio_and_generate_report_task(task_id: str, request_data: Gen
             tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
             return # Exit if upload fails
 
+        # Polling for ACTIVE state
+        if audio_file_for_api:
+            max_polling_attempts = 15
+            polling_interval_seconds = 2
+            for attempt in range(max_polling_attempts):
+                logger.info(f"[TASK {task_id}] Checking file state for {audio_file_for_api.name} (Attempt {attempt + 1}/{max_polling_attempts}). Current state: {audio_file_for_api.state}")
+                if audio_file_for_api.state == genai.types.FileState.ACTIVE:
+                    logger.info(f"[TASK {task_id}] File {audio_file_for_api.name} is now ACTIVE.")
+                    break
+                elif audio_file_for_api.state == genai.types.FileState.PROCESSING:
+                    if attempt == max_polling_attempts - 1:
+                        logger.error(f"[TASK {task_id}] File {audio_file_for_api.name} still PROCESSING after {max_polling_attempts} attempts. Timeout.")
+                        tasks_db[task_id]["status"] = "failed"
+                        tasks_db[task_id]["error_message"] = f"File processing timeout for {audio_file_for_api.name} after {max_polling_attempts * polling_interval_seconds} seconds."
+                        tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
+                        return
+                    logger.info(f"[TASK {task_id}] File {audio_file_for_api.name} is PROCESSING. Waiting for {polling_interval_seconds} seconds.")
+                    await asyncio.sleep(polling_interval_seconds)
+                    try:
+                        updated_file = genai.get_file(name=audio_file_for_api.name)
+                        if updated_file:
+                            audio_file_for_api = updated_file
+                        else:
+                            logger.warning(f"[TASK {task_id}] genai.get_file({audio_file_for_api.name}) returned None unexpectedly.")
+                            # Continue to next attempt or timeout
+                    except Exception as e_get_file:
+                        logger.error(f"[TASK {task_id}] Error fetching file state for {audio_file_for_api.name}: {e_get_file}")
+                        # Continue to next attempt or timeout
+                else: # FAILED or unspecified state
+                    logger.error(f"[TASK {task_id}] File {audio_file_for_api.name} is in a terminal non-ACTIVE state: {audio_file_for_api.state}.")
+                    tasks_db[task_id]["status"] = "failed"
+                    tasks_db[task_id]["error_message"] = f"File {audio_file_for_api.name} entered state {audio_file_for_api.state}."
+                    tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
+                    return
+            else: # Loop completed without break
+                if audio_file_for_api.state != genai.types.FileState.ACTIVE:
+                    logger.error(f"[TASK {task_id}] File {audio_file_for_api.name} did not become ACTIVE after polling. Final state: {audio_file_for_api.state}")
+                    tasks_db[task_id]["status"] = "failed"
+                    tasks_db[task_id]["error_message"] = f"File {audio_file_for_api.name} failed to become ACTIVE. Final state: {audio_file_for_api.state}."
+                    tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
+                    return
+        else: # audio_file_for_api is None
+            logger.error(f"[TASK {task_id}] audio_file_for_api is None before polling. This indicates an issue with the upload logic prior to polling.")
+            tasks_db[task_id]["status"] = "failed"
+            tasks_db[task_id]["error_message"] = "Internal error: Audio file object not available for state polling."
+            tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
+            return
+
         # Instantiate Gemini Model
         model = genai.GenerativeModel(request_data.model_id)
         logger.info(f"[TASK {task_id}] Gemini model '{request_data.model_id}' instantiated.")
 
-        # Prompt Selection
-        summary_prompt_to_use = DEFAULT_SUMMARY_PROMPT_PY
+        # Determine Processing Option (A, B, C)
+        option_choice = None
+        if "transcript_bilingual_summary" in request_data.output_options:
+            option_choice = "C"
+        elif "summary_transcript_tc" in request_data.output_options:
+            option_choice = "B"
+        elif "summary_tc" in request_data.output_options:
+            option_choice = "A"
+        else:
+            logger.warning(f"[TASK {task_id}] Could not determine option choice from output_options: {request_data.output_options}. Defaulting to Option B.")
+            option_choice = "B" # Fallback
+        logger.info(f"[TASK {task_id}] Determined processing option: {option_choice} based on output_options: {request_data.output_options}")
+
+        generated_tc_transcript_text: Optional[str] = None
+        generated_original_transcript_text: Optional[str] = None
+        generated_tc_summary_text: Optional[str] = None
+        generated_en_summary_text: Optional[str] = None
+
+        # --- Transcript Generation (P1 or P2) ---
+        current_transcript_prompt = None
+        # transcript_is_for_report = False # This variable is not strictly needed as we assign to specific text vars
+
+        if option_choice == "A" or option_choice == "B":
+            current_transcript_prompt = P1_AUDIO_TO_TC_TRANSCRIPT
+            if request_data.custom_prompts and request_data.custom_prompts.get("transcript_prompt"):
+                current_transcript_prompt = request_data.custom_prompts["transcript_prompt"]
+                logger.info(f"[TASK {task_id}] Using custom transcript prompt (for P1-like audio to TC transcript).")
+            else:
+                logger.info(f"[TASK {task_id}] Using P1_AUDIO_TO_TC_TRANSCRIPT.")
+        elif option_choice == "C":
+            current_transcript_prompt = P2_AUDIO_TO_ORIGINAL_TRANSCRIPT
+            if request_data.custom_prompts and request_data.custom_prompts.get("transcript_prompt"): # Assuming "transcript_prompt" can be for original lang too
+                current_transcript_prompt = request_data.custom_prompts["transcript_prompt"]
+                logger.info(f"[TASK {task_id}] Using custom transcript prompt (for P2-like audio to Original transcript).")
+            else:
+                logger.info(f"[TASK {task_id}] Using P2_AUDIO_TO_ORIGINAL_TRANSCRIPT.")
+
+        if current_transcript_prompt and audio_file_for_api:
+            try:
+                logger.info(f"[TASK {task_id}] Calling Gemini API for transcript (P1/P2) with prompt: '{current_transcript_prompt[:100]}...'")
+                response_transcript_gen = model.generate_content([current_transcript_prompt, audio_file_for_api], generation_config=genai.types.GenerationConfig())
+                if option_choice == "A" or option_choice == "B":
+                    generated_tc_transcript_text = response_transcript_gen.text
+                    logger.info(f"[TASK {task_id}] Received TC transcript (P1). Length: {len(generated_tc_transcript_text) if generated_tc_transcript_text else 0}")
+                elif option_choice == "C":
+                    generated_original_transcript_text = response_transcript_gen.text
+                    logger.info(f"[TASK {task_id}] Received Original transcript (P2). Length: {len(generated_original_transcript_text) if generated_original_transcript_text else 0}")
+            except Exception as e_transcript_gen:
+                err_msg = f"Error generating transcript (P1/P2): {e_transcript_gen}"
+                logger.error(f"[TASK {task_id}] {err_msg}")
+                if option_choice == "A" or option_choice == "B": generated_tc_transcript_text = err_msg
+                elif option_choice == "C": generated_original_transcript_text = err_msg
+
+        # --- Summary Generation (P3, P4, P5) ---
+        if (option_choice == "A" or option_choice == "B"):
+            if generated_tc_transcript_text and not generated_tc_transcript_text.startswith("Error"):
+                current_summary_prompt = P3_TC_TRANSCRIPT_TO_TC_SUMMARY
+                if request_data.custom_prompts and request_data.custom_prompts.get("summary_prompt"):
+                    current_summary_prompt = request_data.custom_prompts["summary_prompt"]
+                    logger.info(f"[TASK {task_id}] Using custom summary prompt (for P3-like TC summary from TC transcript).")
+                else:
+                    logger.info(f"[TASK {task_id}] Using P3_TC_TRANSCRIPT_TO_TC_SUMMARY.")
+                try:
+                    logger.info(f"[TASK {task_id}] Calling Gemini API for TC summary (P3) with prompt: '{current_summary_prompt[:100]}...' Input text length: {len(generated_tc_transcript_text)}")
+                    response_summary_tc = model.generate_content([current_summary_prompt, generated_tc_transcript_text], generation_config=genai.types.GenerationConfig())
+                    generated_tc_summary_text = response_summary_tc.text
+                    logger.info(f"[TASK {task_id}] Received TC summary (P3). Length: {len(generated_tc_summary_text) if generated_tc_summary_text else 0}")
+                except Exception as e_summary_tc:
+                    err_msg = f"Error generating TC summary (P3): {e_summary_tc}"
+                    logger.error(f"[TASK {task_id}] {err_msg}")
+                    generated_tc_summary_text = err_msg
+            else: # Error or missing TC transcript
+                 err_msg_skip = f"Skipped TC summary (P3) due to error or missing TC transcript. Transcript: {generated_tc_transcript_text[:100] if generated_tc_transcript_text else 'None'}"
+                 generated_tc_summary_text = err_msg_skip
+                 logger.warning(f"[TASK {task_id}] {err_msg_skip}")
+
+        elif option_choice == "C":
+            if generated_original_transcript_text and not generated_original_transcript_text.startswith("Error"):
+                # P4: Original Transcript to TC Summary
+                current_summary_prompt_p4 = P4_ORIGINAL_TRANSCRIPT_TO_TC_SUMMARY
+                if request_data.custom_prompts and request_data.custom_prompts.get("summary_prompt"): # Assuming "summary_prompt" is for TC summary
+                    current_summary_prompt_p4 = request_data.custom_prompts["summary_prompt"]
+                    logger.info(f"[TASK {task_id}] Using custom summary prompt (for P4-like TC summary from Original transcript).")
+                else:
+                    logger.info(f"[TASK {task_id}] Using P4_ORIGINAL_TRANSCRIPT_TO_TC_SUMMARY.")
+                try:
+                    logger.info(f"[TASK {task_id}] Calling Gemini API for TC summary (P4) with prompt: '{current_summary_prompt_p4[:100]}...' Input text length: {len(generated_original_transcript_text)}")
+                    response_summary_tc_p4 = model.generate_content([current_summary_prompt_p4, generated_original_transcript_text], generation_config=genai.types.GenerationConfig())
+                    generated_tc_summary_text = response_summary_tc_p4.text
+                    logger.info(f"[TASK {task_id}] Received TC summary (P4). Length: {len(generated_tc_summary_text) if generated_tc_summary_text else 0}")
+                except Exception as e_summary_tc_p4:
+                    err_msg = f"Error generating TC summary (P4): {e_summary_tc_p4}"
+                    logger.error(f"[TASK {task_id}] {err_msg}")
+                    generated_tc_summary_text = err_msg
+
+                # P5: Original Transcript to EN Summary
+                current_summary_prompt_p5 = P5_ORIGINAL_TRANSCRIPT_TO_EN_SUMMARY
+                # Assuming no separate custom prompt for P5 for now. If "summary_prompt_en" exists, it could be used.
+                # if request_data.custom_prompts and request_data.custom_prompts.get("summary_prompt_en"):
+                #    current_summary_prompt_p5 = request_data.custom_prompts["summary_prompt_en"]
+                #    logger.info(f"[TASK {task_id}] Using custom EN summary prompt (for P5-like EN summary from Original transcript).")
+                # else:
+                logger.info(f"[TASK {task_id}] Using P5_ORIGINAL_TRANSCRIPT_TO_EN_SUMMARY.")
+                try:
+                    logger.info(f"[TASK {task_id}] Calling Gemini API for EN summary (P5) with prompt: '{current_summary_prompt_p5[:100]}...' Input text length: {len(generated_original_transcript_text)}")
+                    response_summary_en_p5 = model.generate_content([current_summary_prompt_p5, generated_original_transcript_text], generation_config=genai.types.GenerationConfig())
+                    generated_en_summary_text = response_summary_en_p5.text
+                    logger.info(f"[TASK {task_id}] Received EN summary (P5). Length: {len(generated_en_summary_text) if generated_en_summary_text else 0}")
+                except Exception as e_summary_en_p5:
+                    err_msg = f"Error generating EN summary (P5): {e_summary_en_p5}"
+                    logger.error(f"[TASK {task_id}] {err_msg}")
+                    generated_en_summary_text = err_msg
+            else: # Error or missing original transcript
+                err_msg_skip_c = f"Skipped P4 & P5 summaries due to error or missing original transcript. Transcript: {generated_original_transcript_text[:100] if generated_original_transcript_text else 'None'}"
+                generated_tc_summary_text = err_msg_skip_c # Both will show this error
+                generated_en_summary_text = err_msg_skip_c
+                logger.warning(f"[TASK {task_id}] {err_msg_skip_c}")
+
+        # --- Adapt for Parsing Logic ---
+        actual_summary_text_for_parsing = generated_tc_summary_text
+        actual_transcript_text_for_parsing = None
+
+        if option_choice == "B":
+            actual_transcript_text_for_parsing = generated_tc_transcript_text
+        elif option_choice == "C":
+            actual_transcript_text_for_parsing = generated_original_transcript_text
+
+        if option_choice == "C" and generated_en_summary_text and not generated_en_summary_text.startswith("Error"):
+            if actual_summary_text_for_parsing and not actual_summary_text_for_parsing.startswith("Error"):
+                actual_summary_text_for_parsing += f"\n\n--- English Summary ---\n{generated_en_summary_text}"
+            elif not actual_summary_text_for_parsing or actual_summary_text_for_parsing.startswith("Error"): # If TC summary failed or was skipped
+                 actual_summary_text_for_parsing = (actual_summary_text_for_parsing + "\n\n" if actual_summary_text_for_parsing else "") + f"--- English Summary ---\n{generated_en_summary_text}"
+
+        # Determine if summary is pre-formatted HTML
+        summary_is_preformatted_html = False # Default to False, meaning Python parsing is needed.
+
+        # Based on current P-prompt definitions (P3, P4, P5 all ask for no HTML tags),
+        # and the assumption that custom prompts also do not return pre-formatted HTML
+        # that should bypass Python parsing.
+        # This flag will consistently be False unless a specific prompt is designed to output raw HTML for direct rendering.
         if request_data.custom_prompts and request_data.custom_prompts.get("summary_prompt"):
-            summary_prompt_to_use = request_data.custom_prompts["summary_prompt"]
-            logger.info(f"[TASK {task_id}] Using custom summary prompt.")
+            logger.info(f"[TASK {task_id}] Custom summary prompt used; Python parsing will be applied.")
         else:
-            logger.info(f"[TASK {task_id}] Using default summary prompt.")
+            logger.info(f"[TASK {task_id}] Default P-prompt used for summary (P3, P4, or P5); Python parsing will be applied as they don't request HTML tags.")
 
-        transcript_prompt_to_use = DEFAULT_TRANSCRIPT_PROMPT_PY
-        if request_data.custom_prompts and request_data.custom_prompts.get("transcript_prompt"):
-            transcript_prompt_to_use = request_data.custom_prompts["transcript_prompt"]
-            logger.info(f"[TASK {task_id}] Using custom transcript prompt.")
-        else:
-            logger.info(f"[TASK {task_id}] Using default transcript prompt.")
-
-        actual_summary_text: Optional[str] = None
-        actual_transcript_text: Optional[str] = None
-
-        # Placeholder for actual summary generation
-        if "summary_tc" in request_data.output_options or \
-           "summary_transcript_tc" in request_data.output_options or \
-           "transcript_bilingual_summary" in request_data.output_options:
-            logger.info(f"[TASK {task_id}] Generating summary using model {request_data.model_id} with prompt: '{summary_prompt_to_use[:100]}...'")
-            try:
-                logger.info(f"[TASK {task_id}] Calling Gemini API for summary with model {request_data.model_id}. Audio URI: {audio_file_for_api.uri}")
-                response_summary = model.generate_content(
-                    [summary_prompt_to_use, audio_file_for_api],
-                    generation_config=genai.types.GenerationConfig(
-                        # candidate_count=1, # Ensure only one candidate is generated
-                        # temperature=0.7 # Adjust as needed
-                    )
-                )
-                actual_summary_text = response_summary.text
-                logger.info(f"[TASK {task_id}] Successfully received summary from API. Text length: {len(actual_summary_text)}")
-            except Exception as e_summary:
-                logger.error(f"[TASK {task_id}] Error generating summary via Gemini API: {e_summary}")
-                actual_summary_text = f"Error generating summary: {e_summary}" # Store error message
-
-        # Actual API Call for Transcript
-        if "summary_transcript_tc" in request_data.output_options or \
-           "transcript_bilingual_summary" in request_data.output_options:
-            logger.info(f"[TASK {task_id}] Generating transcript using model {request_data.model_id} with prompt: '{transcript_prompt_to_use[:100]}...'")
-            try:
-                logger.info(f"[TASK {task_id}] Calling Gemini API for transcript with model {request_data.model_id}. Audio URI: {audio_file_for_api.uri}")
-                response_transcript = model.generate_content(
-                    [transcript_prompt_to_use, audio_file_for_api],
-                    generation_config=genai.types.GenerationConfig(
-                        # candidate_count=1,
-                        # temperature=0.7
-                    )
-                )
-                actual_transcript_text = response_transcript.text
-                logger.info(f"[TASK {task_id}] Successfully received transcript from API. Text length: {len(actual_transcript_text)}")
-            except Exception as e_transcript:
-                logger.error(f"[TASK {task_id}] Error generating transcript via Gemini API: {e_transcript}")
-                actual_transcript_text = f"Error generating transcript: {e_transcript}" # Store error message
+        logger.info(f"[TASK {task_id}] Summary is_preformatted_html set to: {summary_is_preformatted_html}")
 
         # 轉換為結構化資料
         structured_summary_data = None
-        logger.info(f"[TASK {task_id}] Parsing summary text (length: {len(actual_summary_text) if actual_summary_text else 0}).")
-        if actual_summary_text and actual_summary_text.startswith("Error generating summary:"):
-            structured_summary_data = {"intro_paragraph": actual_summary_text, "items": []}
-        elif actual_summary_text:
-            lines = [line.strip() for line in actual_summary_text.strip().split('\n') if line.strip()] # Remove empty lines and strip
+        # The log line below already includes the summary_is_preformatted_html flag.
+        logger.info(f"[TASK {task_id}] Parsing summary text (length: {len(actual_summary_text_for_parsing) if actual_summary_text_for_parsing else 0}). Preformatted HTML: {summary_is_preformatted_html}")
+
+        if actual_summary_text_for_parsing and \
+           (actual_summary_text_for_parsing.startswith("Error generating summary") or \
+            actual_summary_text_for_parsing.startswith("Skipped TC summary") or \
+            actual_summary_text_for_parsing.startswith("Skipped P4 & P5 summaries")):
+            structured_summary_data = {"intro_paragraph": actual_summary_text_for_parsing, "items": []}
+        elif summary_is_preformatted_html and actual_summary_text_for_parsing: # This branch will not be taken with current prompts
+            structured_summary_data = {
+                "intro_paragraph": actual_summary_text_for_parsing, # Store the raw HTML
+                "items": [],
+                "bilingual_append": None
+            }
+            logger.info(f"[TASK {task_id}] Using pre-formatted HTML for summary. Content length: {len(actual_summary_text_for_parsing)}")
+        elif actual_summary_text_for_parsing: # Needs parsing (P3, P4, P5, or custom prompt)
+            lines = [line.strip() for line in actual_summary_text_for_parsing.strip().split('\n') if line.strip()]
             intro = ""
             items = []
             current_item_details = []
@@ -397,10 +647,13 @@ async def process_audio_and_generate_report_task(task_id: str, request_data: Gen
             # if "transcript_bilingual_summary" in request_data.output_options and lines and "(This is the English part" in lines[-1]:
             #     bilingual_append_text = lines.pop(-1)
 
+            if not isinstance(items, list):
+                logger.warning(f"[TASK {task_id}] 'items' was not a list before creating structured_summary_data. Forcing to empty list. Type was: {type(items)}")
+                items = []
             structured_summary_data = {"intro_paragraph": intro.strip(), "items": items, "bilingual_append": bilingual_append_text}
         else: # actual_summary_text is None or empty
             structured_summary_data = {"intro_paragraph": "No summary content received or summary was empty.", "items": []}
-        logger.debug(f"[TASK {task_id}] Parsed summary data: intro_len={len(structured_summary_data['intro_paragraph'])}, items_count={len(structured_summary_data['items'])}")
+        logger.debug(f"[TASK {task_id}] Parsed summary data: intro_len={len(structured_summary_data['intro_paragraph'])}, items_count={len(structured_summary_data.get('items', []))}")
 
         structured_transcript_data = None
         logger.info(f"[TASK {task_id}] Parsing transcript text (length: {len(actual_transcript_text) if actual_transcript_text else 0}).")
@@ -429,7 +682,7 @@ async def process_audio_and_generate_report_task(task_id: str, request_data: Gen
             structured_transcript_data = {"bilingual_prepend": bilingual_prepend_text, "paragraphs": formatted_paragraphs}
         else: # actual_transcript_text is None or empty
             structured_transcript_data = {"paragraphs": [{"content": "No transcript content received or transcript was empty.", "is_speaker_line": False, "speaker": None, "insert_hr_after": False}]}
-        logger.debug(f"[TASK {task_id}] Parsed transcript data: paragraphs_count={len(structured_transcript_data['paragraphs'])}")
+        logger.debug(f"[TASK {task_id}] Parsed transcript data: paragraphs_count={len(structured_transcript_data.get('paragraphs', []))}")
 
         # 檔案生成邏輯
         tasks_db[task_id]["status"] = "generating_report"
@@ -438,7 +691,9 @@ async def process_audio_and_generate_report_task(task_id: str, request_data: Gen
         report_title = f"'{source_basename}' 的 AI 分析報告"
         preview_html = generate_html_report_content_via_jinja(report_title, structured_summary_data, structured_transcript_data, request_data.model_id)
 
-        base_report_filename = f"{sanitize_base_filename(source_basename, 30)}_{request_data.model_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        sanitized_model_id = sanitize_model_id_for_filename(request_data.model_id)
+        base_report_filename = f"{sanitize_base_filename(source_basename, 30)}_{sanitized_model_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        logger.info(f"[TASK {task_id}] Sanitized model ID for filename: '{sanitized_model_id}'. Base report filename: '{base_report_filename}'.")
         download_links = {}
 
         # 生成完整的 HTML 報告
