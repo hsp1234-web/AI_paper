@@ -30,8 +30,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # --- 設定常數和目錄 ---
-TEMP_AUDIO_STORAGE_DIR = "/content/ai_paper_temp_audio"
-GENERATED_REPORTS_DIR = "/content/ai_paper_generated_reports"
+TEMP_AUDIO_STORAGE_DIR = os.getenv("APP_TEMP_AUDIO_STORAGE_DIR", "./temp_audio")
+GENERATED_REPORTS_DIR = os.getenv("APP_GENERATED_REPORTS_DIR", "./generated_reports")
 MAX_CONCURRENT_TASKS = 2 # 最大並行任務數
 
 global_api_key: Optional[str] = None
@@ -165,10 +165,11 @@ async def shutdown_event():
 
 # --- 靜態檔案與主模板 (強化啟動檢查) ---
 try:
-    current_cwd = os.getcwd()
-    logger.debug(f"FastAPI app.py 啟動時的 CWD: {current_cwd}")
-    static_dir_path = os.path.join(current_cwd, "static")
-    templates_dir_path = os.path.join(current_cwd, templates_main_dir)
+    # Get the directory where app.py is located
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    logger.debug(f"FastAPI app.py 啟動時的 app_dir: {app_dir}")
+    static_dir_path = os.path.join(app_dir, "static")
+    templates_dir_path = os.path.join(app_dir, templates_main_dir) # templates_main_dir is "templates"
 
     # 嚴格檢查目錄是否存在，如果不存在則終止應用程式啟動
     if not os.path.exists(static_dir_path):

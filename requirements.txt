@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+pytubefix
+google-generativeai
+Jinja2
+aiofiles
