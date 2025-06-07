@@ -19,6 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import logging # 引入 logging 模組
 import sys # 用於更嚴格的啟動錯誤處理
+import sqlite3
 
 from pytubefix import YouTube
 from pytubefix.exceptions import RegexMatchError, VideoUnavailable, PytubeFixError
@@ -32,14 +33,17 @@ logger = logging.getLogger(__name__)
 # --- 設定常數和目錄 ---
 TEMP_AUDIO_STORAGE_DIR = os.getenv("APP_TEMP_AUDIO_STORAGE_DIR", "./temp_audio")
 GENERATED_REPORTS_DIR = os.getenv("APP_GENERATED_REPORTS_DIR", "./generated_reports")
+DATABASE_URL = "data/tasks.db" # SQLite 資料庫檔案路徑
 MAX_CONCURRENT_TASKS = 2 # 最大並行任務數
 
-global_api_key: Optional[str] = None
-api_key_is_valid: bool = False # 追蹤 API 金鑰的有效性
-tasks_db: Dict[str, Dict[str, Any]] = {}
+# global_api_key: Optional[str] = None # Replaced by dependency injection
+# api_key_is_valid: bool = False # Replaced by dependency injection logic
+temporary_api_key_storage: Optional[str] = None # Stores API key set via /api/set_api_key
+
+# tasks_db: Dict[str, Dict[str, Any]] = {} # Replaced by SQLite
 executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TASKS)
 
-app = FastAPI(title="AI_paper API v2.4 (穩定性優化版)")
+app = FastAPI(title="AI_paper API v2.4 (穩定性優化版 - SQLite & DI)")
 
 # --- 自訂 RequestValidationError 例外處理 (強化錯誤日誌) ---
 @app.exception_handler(RequestValidationError)
@@ -126,6 +130,23 @@ async def startup_event():
     os.makedirs(GENERATED_REPORTS_DIR, exist_ok=True)
     logger.info(f"臨時音訊儲存目錄 '{TEMP_AUDIO_STORAGE_DIR}' 已確認存在。")
     logger.info(f"生成報告儲存目錄 '{GENERATED_REPORTS_DIR}' 已確認存在。")
+    logger.info(f"資料庫檔案將儲存在 '{DATABASE_URL}'。")
+
+    init_db() # 初始化資料庫和表
+
+    # 環境變數中的 API 金鑰優先於應用程式啟動時的配置
+    env_api_key = os.getenv("GOOGLE_API_KEY")
+    if env_api_key:
+        logger.info("[STARTUP] 在環境變數中找到 GOOGLE_API_KEY。嘗試使用其配置 genai...")
+        try:
+            genai.configure(api_key=env_api_key)
+            next(genai.list_models(), None) # 驗證金鑰
+            logger.info("[STARTUP] [SUCCESS] 使用環境變數中的 GOOGLE_API_KEY 成功配置並驗證 genai。")
+        except Exception as e_configure:
+            logger.error(f"[STARTUP] [ERROR] 使用環境變數中的 GOOGLE_API_KEY 配置 genai 時發生錯誤: {e_configure}")
+            # 即使這裡失敗，如果稍後透過 /api/set_api_key 設定了有效的金鑰，應用仍可能工作
+    else:
+        logger.info("[STARTUP] 未在環境變數中找到 GOOGLE_API_KEY。genai 將等待 API 金鑰透過端點設定。")
 
     # 清理舊的臨時音訊檔案 (簡單示例：清理一天前的檔案)
     # 實際應用中，可能需要更複雜的清理策略或透過外部排程任務來執行
@@ -139,29 +160,86 @@ async def startup_event():
         except Exception as e:
             logger.warning(f"清理臨時檔案 {filename} 時發生錯誤: {e}")
 
+# --- 資料庫輔助函式 ---
+def get_db_connection():
+    os.makedirs(os.path.dirname(DATABASE_URL), exist_ok=True) # 確保 data 目錄存在
+    conn = sqlite3.connect(DATABASE_URL, check_same_thread=False) # 允許在不同線程中使用
+    conn.row_factory = sqlite3.Row # 讓查詢結果可以像字典一樣訪問列
+    return conn
 
-    global global_api_key, api_key_is_valid
-    env_api_key = os.getenv("GOOGLE_API_KEY")
-    if env_api_key:
-        logger.info("[INFO] 在環境變數中找到 GOOGLE_API_KEY。嘗試驗證...")
-        try:
-            genai.configure(api_key=env_api_key)
-            # 嘗試一個輕量級的 API 呼叫來實質驗證金鑰
-            # 如果能成功列出模型，則金鑰應有效
-            next(genai.list_models(), None) # 嘗試迭代一個以觸發潛在錯誤或驗證成功
-            global_api_key = env_api_key
-            api_key_is_valid = True
-            logger.info("[SUCCESS] 環境變數中的 GOOGLE_API_KEY 已設定並驗證成功。")
-        except Exception as e_configure:
-            logger.error(f"[ERROR] 使用環境變數中的 GOOGLE_API_KEY 配置 genai 時發生錯誤: {e_configure}")
-            api_key_is_valid = False
-    else:
-        logger.info("[INFO] 未在環境變數中找到 GOOGLE_API_KEY。等待使用者透過 API 設定。")
+def init_db():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS tasks (
+            task_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            source_name TEXT,
+            model_id TEXT,
+            submit_time TEXT NOT NULL,
+            start_time TEXT,
+            completion_time TEXT,
+            result_preview_html TEXT,
+            download_links TEXT, -- Store as JSON string
+            error_message TEXT,
+            request_data TEXT     -- Store as JSON string
+        )
+        ''')
+        conn.commit()
+        logger.info("SQLite database and tasks table initialized successfully.")
+    except sqlite3.Error as e:
+        logger.error(f"Error initializing SQLite database: {e}")
+        # 根據需要，這裡可以決定是否要讓應用程式在資料庫初始化失敗時終止
+        # raise # 重新拋出異常可能會導致應用程式啟動失敗
+    except Exception as e_global:
+        logger.error(f"An unexpected error occurred during database initialization: {e_global}")
+        # raise
+    finally:
+        if 'conn' in locals() and conn:
+            conn.close()
 
 @app.on_event("shutdown")
 async def shutdown_event():
     executor.shutdown(wait=True)
     logger.info("[INFO] ThreadPoolExecutor 已關閉。")
+
+# --- API 金鑰依賴注入 ---
+async def get_validated_api_key(request: Request) -> str:
+    # 優先從環境變數讀取
+    api_key_to_test = os.getenv("GOOGLE_API_KEY")
+    source = "environment variable"
+
+    # 如果環境變數沒有，則嘗試從臨時存儲讀取
+    global temporary_api_key_storage
+    if not api_key_to_test and temporary_api_key_storage:
+        api_key_to_test = temporary_api_key_storage
+        source = "temporary storage"
+
+    if not api_key_to_test:
+        logger.warning("[API_KEY_DEP] API key not found in environment variables or temporary storage.")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API 金鑰尚未設定。請透過環境變數或 API 端點設定。")
+
+    try:
+        # 基本檢查
+        if len(api_key_to_test) < 10: # 假設 API key 長度至少為10
+            raise ValueError("API key is too short.")
+
+        # 關鍵：使用此金鑰配置 genai 並執行輕量級驗證
+        # 這樣，依賴此函式的路由可以直接使用 genai 功能，而不需再次配置
+        genai.configure(api_key=api_key_to_test)
+        logger.info(f"[API_KEY_DEP] genai configured with API key from {source}.")
+        # 嘗試 list_models 作為最終驗證步驟
+        next(genai.list_models(), None)
+        logger.info(f"[API_KEY_DEP] API key from {source} validated by listing models.")
+        return api_key_to_test
+    except Exception as e:
+        logger.error(f"[API_KEY_DEP] Error during validation or configuration of API key from {source}: {e}")
+        # 清除可能已設定的無效臨時金鑰，防止後續請求嘗試使用它
+        if source == "temporary storage":
+            temporary_api_key_storage = None
+            logger.info("[API_KEY_DEP] Invalid temporary API key cleared due to validation failure.")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"提供的 API 金鑰 ({source}) 無效或驗證失敗: {e}")
 
 # --- 靜態檔案與主模板 (強化啟動檢查) ---
 try:
@@ -189,40 +267,52 @@ except Exception as e:
 # --- API 金鑰管理 API (強化驗證邏輯) ---
 @app.post("/api/set_api_key")
 async def set_api_key(request_data: SetApiKeyRequest):
-    global global_api_key, api_key_is_valid
-    logger.debug(f"接收到設定 API 金鑰請求。金鑰 (遮罩後): {'*' * (len(request_data.api_key) - 4) + request_data.api_key[-4:] if len(request_data.api_key) > 4 else '***'}...")
-    is_successfully_validated = False
+    global temporary_api_key_storage
+    logger.debug(f"Received request to set temporary API key.")
     try:
+        # Validate and configure genai with the new key
         genai.configure(api_key=request_data.api_key)
-        # 實際驗證：嘗試列出模型，如果失敗則金鑰可能無效或權限不足
-        next(genai.list_models(), None) # 嘗試迭代一個以觸發潛在錯誤
-        is_successfully_validated = True
-    except Exception as e_val:
-        logger.error(f"[ERROR] 驗證提供的 API 金鑰時發生錯誤: {e_val}")
-        is_successfully_validated = False
+        next(genai.list_models(), None) # Validate by trying to list models
 
-    if is_successfully_validated:
-        global_api_key = request_data.api_key
-        api_key_is_valid = True
-        logger.info(f"[SUCCESS] 臨時 API 金鑰已設定並驗證成功。")
-        return {"message": "API 金鑰已設定並驗證成功。"}
-    else:
-        api_key_is_valid = False # 確保標記為無效
-        logger.error(f"[ERROR] 提供的臨時 API 金鑰驗證失敗。")
-        raise HTTPException(status_code=400, detail="提供的 API 金鑰驗證失敗。請檢查金鑰是否正確且具有所需權限。")
+        temporary_api_key_storage = request_data.api_key
+        logger.info(f"[SUCCESS] Temporary API key set and validated successfully.")
+        return {"message": "臨時 API 金鑰已設定並驗證成功。"}
+    except Exception as e_val:
+        logger.error(f"[ERROR] Failed to validate or set temporary API key: {e_val}")
+        # temporary_api_key_storage = None # Ensure it's not set if validation fails - get_validated_api_key handles this
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"提供的臨時 API 金鑰驗證失敗: {e_val}")
 
 @app.get("/api/check_api_key_status")
-async def check_api_key_status():
-    global global_api_key, api_key_is_valid
-    if global_api_key and api_key_is_valid:
-        logger.debug("API 金鑰狀態檢查：已設定且有效。")
-        return {"status": "set_and_valid", "message": "API 金鑰已設定且有效。"}
-    elif global_api_key and not api_key_is_valid:
-        logger.debug("API 金鑰狀態檢查：已設定但驗證失敗。")
-        return {"status": "set_but_invalid", "message": "API 金鑰已設定但驗證失敗，請重新設定。"}
+async def check_api_key_status(api_key: str = Depends(get_validated_api_key)):
+    # If get_validated_api_key dependency succeeds, it means an API key (either from env or temp)
+    # has been found and successfully used to configure and validate genai.
+    # The actual key string is in api_key variable but we don't need to use it here explicitly.
+    env_key_exists = bool(os.getenv("GOOGLE_API_KEY"))
+    temp_key_exists = bool(temporary_api_key_storage)
+
+    status_detail = "API 金鑰有效。"
+    if env_key_exists:
+        status_detail += " (來源：環境變數)"
+    elif temp_key_exists:
+        status_detail += " (來源：臨時設定)"
     else:
-        logger.debug("API 金鑰狀態檢查：未設定。")
-        return {"status": "not_set", "message": "API 金鑰尚未設定，請設定 API 金鑰。"}
+        # This case should ideally not be reached if get_validated_api_key works correctly,
+        # as it would raise an exception if no key is found.
+        status_detail = "API 金鑰有效，但無法判斷來源 (異常情況)。"
+
+    logger.debug(f"API 金鑰狀態檢查：{status_detail}")
+    return {"status": "set_and_valid", "message": status_detail}
+    # --- Old logic commented out ---
+    # global global_api_key, api_key_is_valid
+    # if global_api_key and api_key_is_valid:
+    #     logger.debug("API 金鑰狀態檢查：已設定且有效。")
+    #     return {"status": "set_and_valid", "message": "API 金鑰已設定且有效。"}
+    # elif global_api_key and not api_key_is_valid:
+    #     logger.debug("API 金鑰狀態檢查：已設定但驗證失敗。")
+    #     return {"status": "set_but_invalid", "message": "API 金鑰已設定但驗證失敗，請重新設定。"}
+    # else:
+    #     logger.debug("API 金鑰狀態檢查：未設定。")
+    #     return {"status": "not_set", "message": "API 金鑰尚未設定，請設定 API 金鑰。"}
 
 
 # --- 輔助函式 (sanitize_filename, generate_html_report_content_via_jinja) ---
@@ -250,21 +340,89 @@ def generate_html_report_content_via_jinja(report_title: str, summary_data: Opti
         return f"<div class='report-content'><p style='color:red;'>抱歉，生成報告預覽時發生內部錯誤：{str(e)}</p></div>"
 
 # --- process_audio_and_generate_report_task (強化錯誤處理) ---
-async def process_audio_and_generate_report_task(task_id: str, request_data: GenerateReportRequest):
-    tasks_db[task_id]["status"] = "processing"
-    tasks_db[task_id]["start_time"] = datetime.now(timezone.utc).isoformat()
+async def process_audio_and_generate_report_task(task_id: str, request_data: GenerateReportRequest, api_key: str):
+    # api_key is passed from the route that used Depends(get_validated_api_key)
+    # Configure genai for this background task execution context
+    try:
+        genai.configure(api_key=api_key)
+        # Optional: further validation like list_models() if desired, but get_validated_api_key should have done it.
+        logger.info(f"[TASK {task_id}] genai configured successfully for background execution.")
+    except Exception as e_conf_bg:
+        logger.error(f"[TASK {task_id}] [ERROR_CRITICAL] Failed to configure genai in background task: {e_conf_bg}")
+        # Update task status to failed
+        error_message = f"背景任務中 API 金鑰配置失敗: {e_conf_bg}"
+        completion_time_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            conn_err = get_db_connection()
+            cursor_err = conn_err.cursor()
+            cursor_err.execute("UPDATE tasks SET status = ?, error_message = ?, completion_time = ? WHERE task_id = ?",
+                               ("failed", error_message, completion_time_iso, task_id))
+            conn_err.commit()
+        except sqlite3.Error as e_sql_err:
+            logger.error(f"[TASK {task_id}] [ERROR_DB] 更新任務狀態為 'failed' (背景金鑰配置錯誤) 時 SQLite 錯誤: {e_sql_err}")
+        finally:
+            if 'conn_err' in locals() and conn_err: conn_err.close()
+        return # Critical failure, cannot proceed
+
+    start_time_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE tasks SET status = ?, start_time = ? WHERE task_id = ?",
+                       ("processing", start_time_iso, task_id))
+        conn.commit()
+        logger.info(f"[TASK {task_id}] 狀態更新為 'processing', 開始時間: {start_time_iso}")
+    except sqlite3.Error as e_sql:
+        logger.error(f"[TASK {task_id}] [ERROR_DB] 更新任務狀態為 'processing' 時 SQLite 錯誤: {e_sql}")
+        # 如果初始狀態更新失敗，可能需要決定是否繼續任務
+        # 此處選擇繼續，但記錄錯誤
+    finally:
+        if 'conn' in locals() and conn: conn.close()
+
     logger.info(f"[TASK {task_id}] 處理開始: {request_data.source_path} (模型: {request_data.model_id})")
 
-    if not global_api_key or not api_key_is_valid:
-        tasks_db[task_id]["status"] = "failed"
-        tasks_db[task_id]["error_message"] = "API 金鑰無效或未設定於背景任務啟動時。請先設定有效的 API 金鑰。"
-        tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
-        logger.error(f"[TASK {task_id}] [ERROR] 失敗 - API 金鑰無效。"); return
+    # Removed check for global_api_key and api_key_is_valid, as api_key is now passed and configured.
+    # if not global_api_key or not api_key_is_valid:
+    #     error_message = "API 金鑰無效或未設定於背景任務啟動時。請先設定有效的 API 金鑰。"
+    #     completion_time_iso = datetime.now(timezone.utc).isoformat()
+    #     try:
+    #         conn = get_db_connection()
+    #         cursor = conn.cursor()
+    #         cursor.execute("UPDATE tasks SET status = ?, error_message = ?, completion_time = ? WHERE task_id = ?",
+    #                        ("failed", error_message, completion_time_iso, task_id))
+    #         conn.commit()
+    #     except sqlite3.Error as e_sql_fail:
+    #         logger.error(f"[TASK {task_id}] [ERROR_DB] 更新任務狀態為 'failed' (API 金鑰無效) 時 SQLite 錯誤: {e_sql_fail}")
+    #     finally:
+    #         if 'conn' in locals() and conn: conn.close()
+    #     logger.error(f"[TASK {task_id}] [ERROR] 失敗 - {error_message}"); return
 
     try:
         # 模擬 AI 輸出和結構化資料轉換邏輯
         # 這裡應該是實際調用 genai API 的地方
-        await asyncio.sleep(5 + len(tasks_db) * 0.5) # 調整模擬延時
+        # 注意：之前使用 len(tasks_db) * 0.5 的模擬延時，現在 tasks_db 不再是記憶體字典。
+        # 如果需要基於當前任務數量的延時，需要從資料庫查詢。為簡化，這裡使用固定延時。
+        await asyncio.sleep(5 + 2 * 0.5) # 假設平均有2個任務在運行
+
+        # --- 指導原則：處理同步阻塞的 AI 呼叫 ---
+        # 未來將此處的模擬操作替換為實際的 AI 模型呼叫 (例如 google-generativeai)。
+        # 由於 genai.GenerativeModel().generate_content() 是同步阻塞操作，
+        # 必須在 asyncio 事件迴圈中透過 await asyncio.to_thread() 或
+        # await loop.run_in_executor(executor, ...) 來執行，以避免阻塞伺服器。
+        # 範例:
+        # model = genai.GenerativeModel(request_data.model_id) # 假設 genai 已配置 API Key
+        #
+        # # 使用 asyncio.to_thread (Python 3.9+)
+        # # response_summary = await asyncio.to_thread(model.generate_content, "提示詞摘要: " + source_basename)
+        # # simulated_summary_text = response_summary.text
+        #
+        # # 或者使用 loop.run_in_executor (需要獲取 loop 和 executor)
+        # # loop = asyncio.get_running_loop()
+        # # response_transcript = await loop.run_in_executor(executor, model.generate_content, "提示詞逐字稿: " + source_basename)
+        # # simulated_transcript_text = response_transcript.text
+        #
+        # # 請確保 genai.configure(api_key=...) 已在應用程式啟動時或透過依賴注入有效執行。
+        # --- 結束指導原則 ---
 
         simulated_summary_text: Optional[str] = None
         simulated_transcript_text: Optional[str] = None
@@ -342,7 +500,17 @@ async def process_audio_and_generate_report_task(task_id: str, request_data: Gen
             structured_transcript_data = {"bilingual_prepend": bilingual_prepend_text, "paragraphs": formatted_paragraphs}
 
         # 檔案生成邏輯
-        tasks_db[task_id]["status"] = "generating_report"
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("UPDATE tasks SET status = ? WHERE task_id = ?", ("generating_report", task_id))
+            conn.commit()
+            logger.info(f"[TASK {task_id}] 狀態更新為 'generating_report'")
+        except sqlite3.Error as e_sql_gen_report_status:
+            logger.warning(f"[TASK {task_id}] [ERROR_DB] 更新任務狀態為 'generating_report' 時 SQLite 錯誤: {e_sql_gen_report_status}")
+        finally:
+            if 'conn' in locals() and conn: conn.close()
+
         await asyncio.sleep(1) # 模擬生成報告的時間
 
         report_title = f"'{source_basename}' 的 AI 分析報告"
@@ -408,18 +576,38 @@ async def process_audio_and_generate_report_task(task_id: str, request_data: Gen
             except Exception as e:
                 logger.error(f"[TASK {task_id}] [ERROR] 儲存 TXT 報告錯誤: {e}")
 
-        tasks_db[task_id]["status"] = "completed"
-        tasks_db[task_id]["result_preview_html"] = preview_html
-        tasks_db[task_id]["download_links"] = download_links
-        tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
-        logger.info(f"[TASK {task_id}] [SUCCESS] 處理完成。")
+        completion_time_iso = datetime.now(timezone.utc).isoformat()
+        download_links_json = json.dumps(download_links)
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE tasks SET status = ?, result_preview_html = ?, download_links = ?, completion_time = ? WHERE task_id = ?",
+                ("completed", preview_html, download_links_json, completion_time_iso, task_id)
+            )
+            conn.commit()
+            logger.info(f"[TASK {task_id}] [SUCCESS] 處理完成。結果已存入資料庫。")
+        except sqlite3.Error as e_sql_complete:
+            logger.error(f"[TASK {task_id}] [ERROR_DB] 更新任務狀態為 'completed' 並儲存結果時 SQLite 錯誤: {e_sql_complete}")
+            # 即使資料庫更新失敗，任務實際上可能已完成，但狀態未正確反映
+        finally:
+            if 'conn' in locals() and conn: conn.close()
 
     except Exception as e:
-        tasks_db[task_id]["status"] = "failed"
-        tasks_db[task_id]["error_message"] = f"背景任務處理失敗: {str(e)}"
-        tasks_db[task_id]["completion_time"] = datetime.now(timezone.utc).isoformat()
-        logger.error(f"[TASK {task_id}] [ERROR] 背景任務處理失敗: {e}")
+        error_message = f"背景任務處理失敗: {str(e)}"
+        completion_time_iso = datetime.now(timezone.utc).isoformat()
+        logger.error(f"[TASK {task_id}] [ERROR] {error_message}")
         traceback.print_exc()
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("UPDATE tasks SET status = ?, error_message = ?, completion_time = ? WHERE task_id = ?",
+                           ("failed", error_message, completion_time_iso, task_id))
+            conn.commit()
+        except sqlite3.Error as e_sql_final_fail:
+            logger.error(f"[TASK {task_id}] [ERROR_DB] 更新任務狀態為 'failed' (一般錯誤) 時 SQLite 錯誤: {e_sql_final_fail}")
+        finally:
+            if 'conn' in locals() and conn: conn.close()
 
 
 # --- 音訊來源處理 API ---
@@ -599,22 +787,13 @@ def sort_models_key_function(model_dict: Dict[str, Any]):
 
 
 @app.get("/api/get_models")
-async def api_get_models_enhanced():
-    logger.info("[API_GET_MODELS_ENHANCED] 請求獲取增強型 AI 模型列表。")
+async def api_get_models_enhanced(api_key: str = Depends(get_validated_api_key)):
+    # api_key parameter is now populated by the dependency, which also configures and validates genai
+    logger.info("[API_GET_MODELS_ENHANCED] 請求獲取增強型 AI 模型列表。金鑰已透過依賴注入驗證。")
 
-    if not api_key_is_valid: # API Key 無效時不嘗試列出模型
-        logger.warning("[API_GET_MODELS_ENHANCED] API Key 無效，返回包含錯誤訊息的模型列表。")
-        return JSONResponse(content=[
-            {"id": "error-api-key-or-network",
-             "dropdown_display_name": "錯誤：無法獲取模型 (API金鑰無效)",
-             "chinese_display_name": "API金鑰無效或網路問題",
-             "chinese_summary_parenthesized": "（請檢查您的 Google API 金鑰是否正確且有權限訪問模型）",
-             "chinese_input_output": "N/A",
-             "chinese_suitable_for": "請在左側設定區輸入有效的 API 金鑰。",
-             "original_description_from_api": "API Key is invalid or not set. Failed to retrieve models from Google API.",
-             "sort_priority": -1 # 最高優先級，確保在列表頂部
-            }
-        ], status_code=500) # 返回 500 錯誤狀態，表示伺服器端獲取模型失敗
+    # The get_validated_api_key dependency will raise HTTPException if the key is invalid or not found,
+    # so we don't need the explicit check here anymore. The code will only proceed if a valid key is available
+    # and genai has been configured by the dependency.
 
     all_models_combined = {}
     try:
@@ -664,32 +843,59 @@ async def api_get_models_enhanced():
 
 
 @app.post("/api/generate_report", status_code=202)
-async def api_submit_generate_report_task(request_data: GenerateReportRequest, background_tasks: BackgroundTasks):
+async def api_submit_generate_report_task(
+    request_data: GenerateReportRequest,
+    background_tasks: BackgroundTasks,
+    api_key: str = Depends(get_validated_api_key) # Inject and validate API key
+):
     task_id = str(uuid.uuid4())
-    logger.info(f"[API_GEN_REPORT] [TASK {task_id}] 收到報告生成請求: 來源='{request_data.source_path}', 模型='{request_data.model_id}'")
+    logger.info(f"[API_GEN_REPORT] [TASK {task_id}] 收到報告生成請求: 來源='{request_data.source_path}', 模型='{request_data.model_id}'。API金鑰已注入。")
 
-    if not global_api_key or not api_key_is_valid:
-        logger.warning(f"[API_GEN_REPORT] [TASK {task_id}] API 金鑰無效或未設定。")
-        raise HTTPException(status_code=401, detail="無效或未設定的 API 金鑰。請先設定有效的 API 金鑰。")
+    # Removed direct check of global_api_key and api_key_is_valid
+    # if not global_api_key or not api_key_is_valid:
+    #     logger.warning(f"[API_GEN_REPORT] [TASK {task_id}] API 金鑰無效或未設定。")
+    #     raise HTTPException(status_code=401, detail="無效或未設定的 API 金鑰。請先設定有效的 API 金鑰。")
 
     if not os.path.exists(request_data.source_path):
         logger.error(f"[API_GEN_REPORT] [TASK {task_id}] 音訊來源檔案不存在: {request_data.source_path}")
         raise HTTPException(status_code=404, detail=f"指定的音訊來源檔案不存在: {os.path.basename(request_data.source_path)}")
 
-    tasks_db[task_id] = {
-        "task_id": task_id,
-        "status": "queued",
-        "source_name": os.path.basename(request_data.source_path),
-        "model_id": request_data.model_id,
-        "submit_time": datetime.now(timezone.utc).isoformat(),
-        "start_time": None,
-        "completion_time": None,
-        "result_preview_html": None,
-        "download_links": None,
-        "error_message": None,
-        "request_data": request_data.model_dump()
-    }
-    background_tasks.add_task(process_audio_and_generate_report_task, task_id, request_data)
+    # 將任務資訊存入 SQLite
+    try:
+        request_data_json = json.dumps(request_data.model_dump()) # Pydantic v2
+        download_links_json = json.dumps(None) # 初始化 download_links 為 null JSON
+        submit_time_iso = datetime.now(timezone.utc).isoformat()
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO tasks (task_id, status, source_name, model_id, submit_time, request_data, download_links)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (task_id, "queued", os.path.basename(request_data.source_path), request_data.model_id,
+             submit_time_iso, request_data_json, download_links_json)
+        )
+        conn.commit()
+        logger.info(f"[API_GEN_REPORT] [TASK {task_id}] 任務資訊成功寫入資料庫。")
+    except sqlite3.Error as e_sql:
+        logger.error(f"[API_GEN_REPORT] [TASK {task_id}] [ERROR_DB] 將任務資訊寫入 SQLite 時發生錯誤: {e_sql}")
+        traceback.print_exc()
+        # 即使資料庫寫入失敗，也可能希望任務繼續（如果記憶體處理可行），或在此處拋出錯誤
+        # 為了保持與之前行為一致（記憶體處理），這裡暫不拋出 HTTP 錯誤，但記錄嚴重錯誤
+        # raise HTTPException(status_code=500, detail="儲存任務資訊到資料庫時發生錯誤。")
+        # 不過，如果資料庫是主要狀態來源，則應拋出錯誤：
+        raise HTTPException(status_code=500, detail=f"任務提交失敗：無法將任務資訊儲存到資料庫。錯誤: {e_sql}")
+    except Exception as e_gen:
+        logger.error(f"[API_GEN_REPORT] [TASK {task_id}] [ERROR_UNEXPECTED] 準備任務資料時發生未預期錯誤: {e_gen}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"任務提交失敗：準備任務資料時發生未預期錯誤。錯誤: {e_gen}")
+    finally:
+        if 'conn' in locals() and conn:
+            conn.close()
+
+    # Pass the validated api_key to the background task
+    background_tasks.add_task(process_audio_and_generate_report_task, task_id, request_data, api_key)
     logger.info(f"[API_GEN_REPORT] [TASK {task_id}] 任務已加入佇列。")
     return {"task_id": task_id, "message": "報告生成任務已加入佇列。", "status": "queued"}
 
@@ -697,40 +903,90 @@ async def api_submit_generate_report_task(request_data: GenerateReportRequest, b
 # --- 任務狀態查詢 API ---
 @app.get("/api/tasks")
 async def get_all_tasks_status():
-    summary_tasks = [{
-        "task_id": td["task_id"],
-        "status": td["status"],
-        "source_name": td["source_name"],
-        "model_id": td["model_id"],
-        "submit_time": td["submit_time"],
-        "error_message": td.get("error_message"),
-        "start_time": td.get("start_time"),
-        "completion_time": td.get("completion_time"),
-        "download_links": td.get("download_links")
-    } for td in tasks_db.values()]
-    return JSONResponse(content=sorted(summary_tasks, key=lambda x: x["submit_time"], reverse=True))
+    logger.debug("[API_TASKS_ALL] 請求獲取所有任務的狀態。")
+    tasks_list = []
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM tasks ORDER BY submit_time DESC")
+        rows = cursor.fetchall()
+        conn.close()
+
+        for row in rows:
+            task_data = dict(row) # 將 sqlite3.Row 轉換為字典
+            # 解析 JSON 字串欄位
+            if task_data.get("download_links"):
+                try:
+                    task_data["download_links"] = json.loads(task_data["download_links"])
+                except json.JSONDecodeError:
+                    logger.warning(f"[API_TASKS_ALL] 解析任務 {task_data['task_id']} 的 download_links JSON 失敗。")
+                    task_data["download_links"] = None # 或設為錯誤提示
+            # request_data 通常不需要在列表視圖中完整顯示，可以選擇不解析或只解析部分
+            # if task_data.get("request_data"):
+            #     try:
+            #         task_data["request_data"] = json.loads(task_data["request_data"])
+            #     except json.JSONDecodeError:
+            #         logger.warning(f"[API_TASKS_ALL] 解析任務 {task_data['task_id']} 的 request_data JSON 失敗。")
+            #         task_data["request_data"] = None
+            del task_data["request_data"] # 從列表視圖中移除詳細請求資料，以減少傳輸量
+            del task_data["result_preview_html"] # 也移除 HTML 預覽
+
+            tasks_list.append(task_data)
+
+        logger.info(f"[API_TASKS_ALL] 成功從資料庫檢索到 {len(tasks_list)} 個任務。")
+
+    except sqlite3.Error as e_sql:
+        logger.error(f"[API_TASKS_ALL] [ERROR_DB] 從 SQLite 讀取所有任務時發生錯誤: {e_sql}")
+        traceback.print_exc()
+        # 返回空列表或錯誤訊息，取決於期望的行為
+        # return JSONResponse(content={"error": "無法獲取任務列表", "detail": str(e_sql)}, status_code=500)
+        # 為了前端相容性，暫時返回空列表
+    except Exception as e_gen:
+        logger.error(f"[API_TASKS_ALL] [ERROR_UNEXPECTED] 處理所有任務狀態時發生未預期錯誤: {e_gen}")
+        traceback.print_exc()
+        # return JSONResponse(content={"error": "處理任務列表時發生未預期錯誤", "detail": str(e_gen)}, status_code=500)
+
+    return JSONResponse(content=tasks_list) # 已按 submit_time DESC 排序
 
 @app.get("/api/tasks/{task_id}")
 async def get_task_status_and_result(task_id: str):
     logger.debug(f"[API_TASK_ID] 請求獲取任務 {task_id} 的詳細狀態。")
-    task = tasks_db.get(task_id)
-    if not task:
-        logger.warning(f"[API_TASK_ID] 找不到任務 ID: {task_id}")
-        raise HTTPException(status_code=404, detail="找不到指定的任務 ID。")
-    response_data = {
-        "task_id": task["task_id"],
-        "status": task["status"],
-        "source_name": task["source_name"],
-        "model_id": task["model_id"],
-        "submit_time": task["submit_time"],
-        "start_time": task.get("start_time"),
-        "completion_time": task.get("completion_time"),
-        "error_message": task.get("error_message")
-    }
-    if task["status"] == "completed":
-        response_data["result_preview_html"] = task.get("result_preview_html")
-        response_data["download_links"] = task.get("download_links")
-    return JSONResponse(content=response_data)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,))
+        row = cursor.fetchone()
+        conn.close()
+
+        if not row:
+            logger.warning(f"[API_TASK_ID] 在資料庫中找不到任務 ID: {task_id}")
+            raise HTTPException(status_code=404, detail="找不到指定的任務 ID。")
+
+        task_data = dict(row) # 將 sqlite3.Row 轉換為字典
+
+        # 解析 JSON 字串欄位
+        if task_data.get("download_links"):
+            try:
+                task_data["download_links"] = json.loads(task_data["download_links"])
+            except json.JSONDecodeError:
+                logger.warning(f"[API_TASK_ID] 解析任務 {task_id} 的 download_links JSON 失敗。")
+                task_data["download_links"] = {"error": "Failed to parse download links"}
+
+        # request_data 通常不需要在單任務詳細視圖中返回給客戶端，除非特定需求
+        if 'request_data' in task_data:
+            del task_data['request_data'] # 通常不返回完整的原始請求
+
+        logger.info(f"[API_TASK_ID] 成功從資料庫檢索到任務 {task_id} 的詳細資訊。")
+        return JSONResponse(content=task_data)
+
+    except sqlite3.Error as e_sql:
+        logger.error(f"[API_TASK_ID] [ERROR_DB] 從 SQLite 讀取任務 {task_id} 時發生錯誤: {e_sql}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"查詢任務狀態時發生資料庫錯誤: {e_sql}")
+    except Exception as e_gen:
+        logger.error(f"[API_TASK_ID] [ERROR_UNEXPECTED] 處理任務 {task_id} 狀態時發生未預期錯誤: {e_gen}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"查詢任務狀態時發生未預期錯誤: {e_gen}")
 
 
 # --- 下載生成的報告檔案 API ---
