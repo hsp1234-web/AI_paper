@@ -43,9 +43,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let currentSelectedAudioPath = null;
     let currentSourceType = 'youtube';
-    let activePollingIntervalId = null;
-    const POLLING_INTERVAL = 5000;
+    // let activePollingIntervalId = null; // Replaced by new polling logic
+    // const POLLING_INTERVAL = 5000; // Replaced by new polling logic
     let allModelsDataCache = []; // 用於快取從 API 獲取的完整模型資料
+
+    // New polling control variables
+    const INITIAL_POLLING_INTERVAL = 5000; // 初始輪詢間隔
+    const MAX_POLLING_DELAY = 60000;    // 最大輪詢延遲
+    let currentPollingDelay = INITIAL_POLLING_INTERVAL;
+    let pollingTimeoutId = null; // 用於儲存 setTimeout 返回的 ID
+    let isPollingStoppedManually = false; // 標記是否因為所有任務完成而手動停止輪詢
 
     const DEFAULT_SUMMARY_PROMPT = "請根據音訊內容，生成一份簡潔、專業的繁體中文重點摘要。摘要應包含一個總體主旨的開頭段落，以及數個帶有粗體子標題的重點條目，每個條目下使用無序列表列出關鍵細節。請勿在摘要中包含時間戳記。範例如下：\n\n**重點1子標題**\n- 細節1\n- 細節2";
     const DEFAULT_TRANSCRIPT_PROMPT = "請將音訊內容轉換為逐字稿。如果內容包含多位發言者，請嘗試區分（例如：發言者A, 發言者B）。對於專有名詞、品牌名稱、人名等，請盡可能以「中文 (English)」的格式呈現。請確保標點符號的準確性，並以自然的段落分隔。";
@@ -79,8 +86,20 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- 其他輔助函式 ---
     function _showSection(sectionElement, displayType = 'block') { if (sectionElement) sectionElement.style.display = displayType; }
     function _hideSection(sectionElement) { if (sectionElement) sectionElement.style.display = 'none'; }
-    function _enableButton(button, text, iconClass = null) { if (!button) return; button.disabled = false; let newHTML = text; if (iconClass) newHTML = `<i class="${iconClass}"></i> ${text}`; button.innerHTML = newHTML;}
-    function _disableButton(button, text, iconClass = "fas fa-spinner fa-spin") { if (!button) return; button.disabled = true; button.innerHTML = `<i class="${iconClass}"></i> ${text}`; }
+    function _enableButton(button, text, iconClass = null) {
+        if (!button) return;
+        button.disabled = false;
+        if (button) button.setAttribute('aria-disabled', 'false');
+        let newHTML = text;
+        if (iconClass) newHTML = `<i class="${iconClass}"></i> ${text}`;
+        button.innerHTML = newHTML;
+    }
+    function _disableButton(button, text, iconClass = "fas fa-spinner fa-spin") {
+        if (!button) return;
+        button.disabled = true;
+        if (button) button.setAttribute('aria-disabled', 'true');
+        button.innerHTML = `<i class="${iconClass}"></i> ${text}`;
+    }
 
     // 主題管理
     const applyTheme = (theme) => {
@@ -389,6 +408,7 @@ document.addEventListener('DOMContentLoaded', () => {
     async function loadAiModels() {
         logStatus('正在獲取 AI 模型列表...', 'info', {clearExisting: false});
         console.debug("[Models] 開始載入 AI 模型列表...");
+        if (modelInfoDisplay) modelInfoDisplay.setAttribute('aria-busy', 'true');
         try {
             const response = await fetch('/api/get_models');
             if (!response.ok) {
@@ -454,12 +474,15 @@ document.addEventListener('DOMContentLoaded', () => {
             if (aiModelSelect) aiModelSelect.innerHTML = '<option value="">模型載入失敗</option>';
             _hideSection(modelInfoDisplay);
             _disableButton(startAnalysisBtn, '模型載入失敗', 'fas fa-exclamation-circle');
+        } finally {
+            if (modelInfoDisplay) modelInfoDisplay.setAttribute('aria-busy', 'false');
         }
     }
 
     // 新增：顯示單一模型詳細介紹的函式
     function displaySingleModelDetails(modelData) {
         if (!modelInfoDisplay || !modelData) return;
+        modelInfoDisplay.setAttribute('aria-busy', 'true');
         let html = `
             <p><strong>中文名稱：</strong> ${modelData.chinese_display_name || modelData.dropdown_display_name || modelData.id.replace("models/", "")}
                 <span style="font-weight:normal; color:var(--text-color-secondary);">${modelData.chinese_summary_parenthesized || ''}</span></p>`;
@@ -476,6 +499,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         html += `<p style="font-size:0.8em; color:var(--text-color-tertiary); margin-top:10px;">模型 ID: ${modelData.id}</p>`;
         modelInfoDisplay.innerHTML = html;
+        modelInfoDisplay.setAttribute('aria-busy', 'false');
     }
 
     // --- Task Queue Management ---
@@ -561,6 +585,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function fetchTaskQueue() {
+        if (isPollingStoppedManually) {
+            console.debug("[Polling] Polling is manually stopped. Not fetching queue.");
+            return;
+        }
+
+        clearTimeout(pollingTimeoutId); // Clear any pending timeout to prevent race conditions if called manually
+        if (taskQueueContainer) taskQueueContainer.setAttribute('aria-busy', 'true');
+
         try {
             const response = await fetch('/api/tasks');
             if (!response.ok) {
@@ -569,22 +601,29 @@ document.addEventListener('DOMContentLoaded', () => {
             const tasks = await response.json();
             updateTaskQueueDisplay(tasks);
 
-            // 如果所有任務都已完成或失敗，則停止輪詢
+            currentPollingDelay = INITIAL_POLLING_INTERVAL; // Reset delay on successful fetch
+
             const anyProcessingOrQueued = tasks.some(task => task.status === 'processing' || task.status === 'queued');
-            if (!anyProcessingOrQueued && activePollingIntervalId) {
-                clearInterval(activePollingIntervalId);
-                activePollingIntervalId = null;
-                console.debug("[Polling] 所有任務完成，輪詢已停止。");
-                logStatus("所有任務已處理完成。", "success", {clearExisting: false});
+            if (!anyProcessingOrQueued && tasks.length > 0) { // tasks.length > 0 ensures we don't stop if initially empty
+                isPollingStoppedManually = true;
+                pollingTimeoutId = null; // Clear timeoutId as we are stopping
+                console.debug("[Polling] All tasks completed or failed, polling stopped.");
+                logStatus("所有任務已處理完成或失敗。", "success", {clearExisting: false});
+            } else {
+                isPollingStoppedManually = false; // Ensure it's false if there are active tasks or no tasks
+                pollingTimeoutId = setTimeout(fetchTaskQueue, currentPollingDelay);
+                console.debug(`[Polling] Next poll scheduled in ${currentPollingDelay / 1000}s`);
             }
         } catch (error) {
             console.error("獲取任務佇列時發生錯誤:", error);
-            logStatus(`獲取任務佇列失敗: ${error.message}`, 'error', {clearExisting: false});
-            if (activePollingIntervalId) {
-                clearInterval(activePollingIntervalId);
-                activePollingIntervalId = null;
-                console.debug("[Polling] 輪詢因錯誤停止。");
-            }
+            logStatus(`獲取任務佇列失敗: ${error.message}. 將在 ${currentPollingDelay / 1000} 秒後重試。`, 'error', {clearExisting: false});
+
+            currentPollingDelay = Math.min(MAX_POLLING_DELAY, currentPollingDelay * 2); // Exponential backoff
+            isPollingStoppedManually = false; // Not manually stopped, it's an error, so we'll retry
+            pollingTimeoutId = setTimeout(fetchTaskQueue, currentPollingDelay);
+            console.debug(`[Polling] Error occurred. Retrying in ${currentPollingDelay / 1000}s`);
+        } finally {
+            if (taskQueueContainer) taskQueueContainer.setAttribute('aria-busy', 'false');
         }
     }
 
@@ -599,6 +638,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const taskId = event.currentTarget.dataset.taskId;
                 logStatus(`正在載入任務 ${taskId.substring(0,8)} 的報告...`, 'info', {clearExisting: true});
                 _disableButton(event.currentTarget, '載入中...', 'fas fa-sync-alt fa-spin');
+                if (reportOutputArea) reportOutputArea.setAttribute('aria-busy', 'true');
                 try {
                     const response = await fetch(`/api/tasks/${taskId}`);
                     if (!response.ok) {
@@ -637,6 +677,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     logStatus(`載入報告失敗: ${error.message}`, 'error');
                 } finally {
                     _enableButton(event.currentTarget, '查看報告', 'fas fa-eye');
+                    if (reportOutputArea) reportOutputArea.setAttribute('aria-busy', 'false');
                 }
             });
         });
@@ -727,13 +768,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 logStatus(`任務 ${result.task_id} 已成功提交: ${result.message}`, 'success');
                 console.info(`[AnalysisStart] 任務 ${result.task_id} 已提交。`);
-                if (!activePollingIntervalId) {
-                    fetchTaskQueue(); // 立即更新一次任務列表
-                    activePollingIntervalId = setInterval(fetchTaskQueue, POLLING_INTERVAL);
-                    console.debug("[Polling] 輪詢已啟動。");
-                } else {
-                    fetchTaskQueue(); // 如果已在輪詢，也立即更新一次
-                }
+
+                // New polling (re)start logic
+                clearTimeout(pollingTimeoutId); // Cancel any scheduled next poll
+                isPollingStoppedManually = false; // Ensure polling will continue or restart
+                currentPollingDelay = INITIAL_POLLING_INTERVAL; // Reset to initial interval
+                fetchTaskQueue(); // Immediately fetch to show the new task
+                console.debug("[Polling] New task submitted, polling (re)started/forced.");
 
             } catch (error) {
                 console.error("[AnalysisStart] 提交 AI 分析任務時發生捕捉到的錯誤:", error);
@@ -746,9 +787,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Initial Setup ---
     function initializeApp() {
-        console.info("[AppInit] AI_paper 應用程式初始化開始 (v2.4 - 優化版)。");
+        console.info("[AppInit] AI_paper 應用程式初始化開始 (v2.4 - 優化版 with Exp Backoff Polling)。");
         if(statusLog) statusLog.innerHTML = '';
         logStatus("AI_paper 應用程式準備中...", "info");
+
+        isPollingStoppedManually = false; // Reset polling state on init
+        currentPollingDelay = INITIAL_POLLING_INTERVAL; // Reset polling delay on init
+        clearTimeout(pollingTimeoutId); // Clear any old timeouts if any
 
         // ****** 設定預設提示詞為 textarea 的 value ******
         if(customSummaryPromptInput && DEFAULT_SUMMARY_PROMPT) {
@@ -829,8 +874,15 @@ document.addEventListener('DOMContentLoaded', () => {
                 logStatus(`從 URL 載入報告失敗: ${error.message}`, 'error');
             }
         }
-        fetchTaskQueue(); // 啟動時立即獲取一次任務列表
-        activePollingIntervalId = setInterval(fetchTaskQueue, POLLING_INTERVAL); // 啟動輪詢
+        // fetchTaskQueue(); // Start the first poll
+        // activePollingIntervalId = setInterval(fetchTaskQueue, POLLING_INTERVAL); // Old polling start
+
+        // New: Start first poll
+        clearTimeout(pollingTimeoutId); // Ensure no old timeout is lingering
+        isPollingStoppedManually = false; // Explicitly set for clarity
+        currentPollingDelay = INITIAL_POLLING_INTERVAL;
+        fetchTaskQueue();
+        console.debug("[AppInit] Initial task queue fetch initiated.");
 
         console.info("[AppInit] AI_paper 應用程式初始化完成。");
         logStatus("AI_paper 應用程式已就緒。", "success");

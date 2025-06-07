@@ -4,3 +4,4 @@ pytubefix
 google-generativeai
 Jinja2
 aiofiles
+python-multipart

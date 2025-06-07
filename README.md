@@ -9,7 +9,7 @@
 ### 方法一：一鍵複製腳本到 Colab (最推薦)
 
 1.  **點擊下方按鈕**：
-    [![在 Colab 中開啟](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/gist/LaiHao-Alex/9262b3a90b0529900791997bb3f97815/ai_paper_audio_analysis_tool_colab_quick_launcher.ipynb)
+    [![在 Colab 中開啟](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/hsp1234-web/AI_paper/blob/main/colab/AI_Paper_Quick_Start.ipynb)
 2.  **開啟 Colab 筆記本**：點擊按鈕後，腳本將自動在 Google Colab 中開啟一個新的筆記本。
 3.  **執行儲存格**：點擊筆記本中第一個儲存格左側的執行按鈕 (▶️) 開始設定。
     *   您需要授權 Google Drive 存取權限。
@@ -306,18 +306,45 @@ except Exception as main_exception:
 
 ### 方法二：上傳專案壓縮檔到 Colab
 
-1.  **下載專案**：
-    *   您可以前往本專案的 GitHub 頁面，點擊 "Code" 按鈕，然後選擇 "Download ZIP"，或者 [直接點擊這裡下載 ZIP 壓縮檔](https://github.com/LaiHao-Alex/AI_paper_audio_analysis/archive/refs/heads/main.zip)。
-    *   將下載的 ZIP 檔案儲存到您的電腦。
-2.  **開啟 Google Colab 並建立新筆記本**：
+使用此方法，您可以將本專案的完整程式碼下載為 ZIP 檔案，然後上傳到 Google Colab 中執行。
+
+**操作步驟：**
+
+1.  **下載專案的 ZIP 壓縮檔**：
+    *   前往本專案的 GitHub 頁面。
+    *   點擊綠色的 "Code" 按鈕。
+    *   在下拉選單中選擇 "Download ZIP"。
+    *   將下載的 ZIP 檔案 (例如 `AI_paper-main.zip` 或類似名稱) 儲存到您的電腦。
+    *   **重要提示**：請勿解壓縮此 ZIP 檔案。您將上傳完整的 ZIP 檔案。
+
+2.  **開啟新的 Google Colab 筆記本**：
     *   前往 [Google Colab](https://colab.research.google.com/)。
-    *   點擊 "File" -> "New notebook" 來建立一個新的 Colab 筆記本。
-3.  **準備 Colab 環境**：
-    *   在新 Colab 筆記本的第一個儲存格中，貼上下列腳本。
-    *   執行此儲存格以上傳您的專案 ZIP 檔案並設定環境。
-4.  **上傳 ZIP 檔案**：執行腳本後，會出現一個上傳按鈕。點擊它並選擇您之前下載的專案 ZIP 檔案。
-5.  **等待設定完成**：腳本會自動解壓縮檔案、安裝依賴套件並啟動應用程式。
-6.  **取得公開 URL**：完成後，輸出末尾會提供一個公開 URL。
+    *   點擊 "File" (檔案) 選單，然後選擇 "New notebook" (新增筆記本)。
+
+3.  **複製並貼上部署腳本**：
+    *   在本 README 文件的下方找到標題為「**Colab 設定腳本：**」(或英文 "Colab Setup Script:") 的區塊。
+    *   **完整複製**該區塊內的所有 Python 程式碼 (從 `#@title AI Paper 音訊分析工具 Colab 上傳啟動器` 開始，一直到腳本末尾)。
+    *   將複製的完整腳本貼到您在 Colab 中新建立的筆記本的第一個儲存格中。
+
+4.  **執行 Colab 儲存格並上傳 ZIP 檔案**：
+    *   點擊 Colab 儲存格左側的執行按鈕 (▶️)。
+    *   腳本執行後，會出現一個檔案上傳按鈕 (通常標示為 "Choose Files" 或類似文字)。
+    *   點擊此按鈕，然後選擇您在步驟 1 中下載的專案 ZIP 檔案。
+
+5.  **等待設定與應用程式啟動**：
+    *   腳本會自動處理以下事項：
+        *   (可選) 掛載您的 Google Drive 以便儲存資料。
+        *   解壓縮您上傳的 ZIP 檔案。
+        *   校正任何因 GitHub ZIP 結構產生的額外資料夾層級。
+        *   安裝所有必要的 Python 套件。
+        *   設定 API 金鑰 (如果 Colab 「密鑰」中未設定 `GOOGLE_API_KEY`，系統會提示您手動輸入)。
+        *   啟動應用程式。
+    *   整個過程可能需要幾分鐘，請耐心等候。
+
+6.  **取得並使用公開 URL**：
+    *   當腳本執行完畢且應用程式成功啟動後，儲存格的輸出末尾會顯示一個公開的 URL (通常結尾是 `.ngrok.io` 或 `loca.lt`)。
+    *   點擊此 URL 即可在新的瀏覽器分頁中開啟並開始使用「AI Paper 音訊分析工具」。
+    *   請保持 Colab 筆記本的儲存格持續執行，以維持應用程式的運作。
 
 **Colab 設定腳本：**
 ```python
