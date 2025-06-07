@@ -30,8 +30,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # --- 設定常數和目錄 ---
-TEMP_AUDIO_STORAGE_DIR = "./temp_audio"
-GENERATED_REPORTS_DIR = "./generated_reports"
+TEMP_AUDIO_STORAGE_DIR = os.getenv("APP_TEMP_AUDIO_STORAGE_DIR", "./temp_audio")
+GENERATED_REPORTS_DIR = os.getenv("APP_GENERATED_REPORTS_DIR", "./generated_reports")
 MAX_CONCURRENT_TASKS = 2 # 最大並行任務數
 
 global_api_key: Optional[str] = None
